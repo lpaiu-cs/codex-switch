@@ -1,0 +1,20 @@
+# Windows shell cruft
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Editor / IDE
+.vs/
+.vscode/
+*.suo
+*.user
+
+# Local logs / temp / runtime artifacts
+*.log
+*.tmp
+*.bak
+codex-switch.lock
+
+# Release build output (tools/build-release.ps1)
+dist/

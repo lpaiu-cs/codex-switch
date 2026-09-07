@@ -1,0 +1,123 @@
+name: Release
+
+# Pushing a tag like v1.0.0 builds the archive and publishes the GitHub Release.
+# workflow_dispatch runs the same build and checks without publishing, so the archive can be
+# downloaded as a CI artifact and inspected before a real tag is cut.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # windows-latest with `shell: powershell` is Windows PowerShell 5.1 - the same runtime
+      # end users have, so the build and the smoke test exercise the real target.
+      - name: Resolve version
+        id: version
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^[vV]', ''
+            $publish = 'true'
+          } else {
+            $m = Select-String -Path .\codex-switch.ps1 -Pattern '^\s*\$ScriptVersion\s*=\s*''([^'']+)''' | Select-Object -First 1
+            if (-not $m) { throw 'Could not read the version from codex-switch.ps1.' }
+            $version = $m.Matches[0].Groups[1].Value
+            $publish = 'false'
+          }
+          Write-Host "version=$version publish=$publish"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "publish=$publish" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      # Fails if the tag and $ScriptVersion disagree, so a release can't report a version
+      # different from the tag it was cut from.
+      - name: Build archive
+        shell: powershell
+        run: .\tools\build-release.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Smoke test -Version
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = 'codex-switch ${{ steps.version.outputs.version }}'
+          $actual = ((& powershell -NoProfile -ExecutionPolicy Bypass -File .\codex-switch.ps1 -Version) -join '').Trim()
+          Write-Host "reported: $actual"
+          if ($actual -ne $expected) { throw "-Version reported '$actual', expected '$expected'." }
+
+      - name: Verify archive contents
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.version.outputs.version }}'
+          $root = "codex-switch-$version/"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = (Get-Item ".\dist\codex-switch-$version.zip").FullName
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+          } finally {
+            $archive.Dispose()
+          }
+          $entries | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+          $stray = @($entries | Where-Object { $_ -notlike "$root*" })
+          if ($stray.Count) { throw "Entries outside ${root}: $($stray -join ', ')" }
+
+          foreach ($req in @('codex-switch.ps1', '1-main.cmd', '2-work.cmd', 'list.cmd', 'menu.cmd', 'status.cmd', 'stop.cmd', 'README.md', 'CHANGELOG.md', 'LICENSE')) {
+            if ($entries -notcontains "$root$req") { throw "Archive is missing $req." }
+          }
+
+          # The Korean-named launcher and manual must survive packaging with decodable names.
+          $korean = @($entries | Where-Object { $_ -cmatch '[^\x00-\x7F]' })
+          if ($korean.Count -lt 2) {
+            throw "Expected the Korean-named launcher and manual in the archive; found $($korean.Count) non-ASCII entry/entries."
+          }
+
+      # Explicit UTF-8 read and write so the Korean release notes survive: PowerShell 5.1 would
+      # otherwise decode a BOM-less UTF-8 file as the legacy ANSI codepage.
+      - name: Prepare release notes
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $notes = Get-Content -LiteralPath '.github\RELEASE_NOTES.md' -Raw -Encoding UTF8
+          $notes = $notes.Replace('{{VERSION}}', '${{ steps.version.outputs.version }}')
+          $out = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [System.IO.File]::WriteAllText($out, $notes, (New-Object System.Text.UTF8Encoding($false)))
+          "NOTES_FILE=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-switch-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: steps.version.outputs.publish == 'true'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ steps.version.outputs.version }}'
+          $zip = "dist/codex-switch-$version.zip"
+          $ghArgs = @(
+            'release', 'create', $env:GITHUB_REF_NAME,
+            $zip,
+            "$zip.sha256",
+            '--title', "codex-switch v$version",
+            '--notes-file', $env:NOTES_FILE
+          )
+          & gh @ghArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE." }
