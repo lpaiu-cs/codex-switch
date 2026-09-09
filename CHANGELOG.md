@@ -6,6 +6,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Release tags are `v<version>` (e.g. `v1.0.0`), and `codex-switch.ps1 -Version` reports the
 version of the copy you have.
 
+## [1.0.1] - 2026-09-09
+
+### Fixed
+
+- **Codex would not start again after a switch.** Stopping the desktop app by killing its
+  processes one by one (the claude-switch approach) races Windows' teardown of the app's MSIX
+  container: the AppX runtime logs hundreds of failed "Destroyed Desktop AppX container" attempts,
+  keeps the package marked as running, and every later activation yields a `ChatGPT.exe` that stays
+  suspended with no window until the user signs out. The app is now shut down through the package
+  deployment API (`Add-AppxPackage -Register -ForceApplicationShutdown`), which terminates the whole
+  container in order in ~0.4 s; per-process termination is kept only for processes outside the
+  container (terminal CLI sessions, the VS Code extension, npm installs).
+- **Self-repair on a stalled launch.** After launching, codex-switch waits for the app to actually
+  start (several processes with modules loaded). A lone suspended stub is treated as the wedged
+  container state: the stub is removed, the package shutdown is run once more, and the launch is
+  retried once. This also recovers machines left in that state by 1.0.0.
+
 ## [1.0.0] - 2026-09-08
 
 First release. A sibling of [claude-switch](https://github.com/lpaiu-cs/claude-switch) for Codex,
@@ -45,4 +62,5 @@ redesigned around how Codex actually stores an account (see [docs/DESIGN.md](doc
   `thread_history_1.sqlite`, `state_5.sqlite`, `memories/` per profile for users who need thread
   history kept apart between accounts.
 
+[1.0.1]: https://github.com/lpaiu-cs/codex-switch/releases/tag/v1.0.1
 [1.0.0]: https://github.com/lpaiu-cs/codex-switch/releases/tag/v1.0.0

@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Tool version. Kept in sync with the git tag / GitHub release, which is tagged "v$ScriptVersion".
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 
 if ($Version) {
   Write-Host "codex-switch $ScriptVersion"
@@ -83,13 +83,14 @@ function Resolve-CodexPaths {
 
   # The desktop app is optional: CLI-only installs (npm / standalone) are switched exactly the same
   # way, we just have nothing to launch afterwards.
-  $aumid = $null
+  $aumid = $null; $manifest = $null
   $pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($pkg) {
     try {
       $appId = @((Get-AppxPackageManifest $pkg).Package.Applications.Application)[0].Id
       $aumid = "$($pkg.PackageFamilyName)!$appId"
     } catch { $aumid = "$($pkg.PackageFamilyName)!App" }
+    $manifest = Join-Path $pkg.InstallLocation 'AppxManifest.xml'
   }
 
   [pscustomobject]@{
@@ -100,6 +101,7 @@ function Resolve-CodexPaths {
     Marker  = Join-Path $store 'active.txt'
     Lock    = Join-Path $store 'codex-switch.lock'
     Aumid   = $aumid
+    Manifest = $manifest
   }
 }
 
@@ -173,9 +175,33 @@ function Get-CodexProcesses {
   return $out.ToArray()   # ToArray, not @($out): @() on a List[object] throws in PS 5.1
 }
 
+# Shut the desktop app down the way Windows itself does it. Re-registering the installed package
+# with -ForceApplicationShutdown makes the AppX runtime terminate the app's whole Desktop AppX
+# container (main process, renderers, the codex.exe app-server and every child) and tear the
+# container down in the right order. Killing those processes one by one with Stop-Process is what
+# claude-switch does, but for Codex it races the container teardown: Windows then logs hundreds of
+# "Destroyed Desktop AppX container" attempts, keeps the package marked as running, and every later
+# launch creates a ChatGPT.exe that sits suspended forever with no window (until a sign-out). The
+# same call repairs that wedged state, which is why it also runs before a launch that produced such
+# a stub. Takes ~0.4 s; re-registering the same version keeps all data and settings.
+function Invoke-CodexPackageShutdown {
+  if (-not $CX.Manifest -or -not (Test-Path -LiteralPath $CX.Manifest)) { return $false }
+  try {
+    Add-AppxPackage -Register -DisableDevelopmentMode -ForceApplicationShutdown $CX.Manifest -ErrorAction Stop
+    return $true
+  } catch {
+    Write-Host "[stop] package shutdown via Add-AppxPackage failed, falling back to per-process kill: $(($_.Exception.Message -split "`n")[0])" -ForegroundColor DarkYellow
+    return $false
+  }
+}
+
 function Stop-Codex {
-  # Success is verified against concrete PIDs, not against whether detection can still see them:
-  # once a parent exits a surviving child could drop out of a fresh scan and fake an "all closed".
+  # 1) the MSIX app and everything inside its container, via the deployment API (see above)
+  [void](Invoke-CodexPackageShutdown)
+  # 2) whatever lives outside the container - CLI sessions in terminals, the VS Code extension's
+  #    app-server, npm installs - plus any straggler. Success is verified against concrete PIDs,
+  #    not against whether detection can still see them: once a parent exits a surviving child
+  #    could drop out of a fresh scan and fake an "all closed".
   $tracked = @{}
   for ($i = 0; $i -lt 30; $i++) {
     foreach ($p in @(Get-CodexProcesses)) { $tracked[[int]$p.ProcessId] = $p.Name }
@@ -190,6 +216,21 @@ function Stop-Codex {
     throw "Codex is still running and could not be closed: $list. Close it manually, then retry."
   }
   return $tracked.Count
+}
+
+# Activate the app and confirm it really started. A healthy launch has several ChatGPT.exe
+# processes with modules loaded within a second; a wedged container yields a single process with
+# no modules that never wakes up. Returns $true on a real start.
+function Start-CodexApp {
+  $t0 = Get-Date
+  Start-Process "shell:AppsFolder\$($CX.Aumid)"
+  while (((Get-Date) - $t0).TotalSeconds -lt 8) {
+    Start-Sleep -Milliseconds 400
+    $ps = @(Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -ge $t0.AddSeconds(-1) })
+    if ($ps.Count -gt 1) { return $true }
+    foreach ($p in $ps) { try { if ($p.Modules.Count -gt 5) { return $true } } catch { } }
+  }
+  return $false
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -528,8 +569,17 @@ try {
 
   if (-not $NoLaunch) {
     if ($CX.Aumid) {
-      Start-Process "shell:AppsFolder\$($CX.Aumid)"
       Write-Host "Launching Codex..." -ForegroundColor Green
+      if (-not (Start-CodexApp)) {
+        # The app never got past a suspended stub: the package's container is wedged. Repair it the
+        # same way Stop does and try exactly once more.
+        Write-Host "[launch] Codex did not start (Windows still thinks it is running) - repairing and retrying once..." -ForegroundColor Yellow
+        Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { -not $_.Path -or $_.Path -like '*\WindowsApps\OpenAI.Codex_*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+        [void](Invoke-CodexPackageShutdown)
+        if (-not (Start-CodexApp)) {
+          Write-Host "[launch] Codex still does not start. Run stop.cmd, then try again; if that fails, sign out of Windows and back in." -ForegroundColor Red
+        }
+      }
     } else {
       Write-Host "Codex desktop app not installed - run 'codex' in a terminal to use this account." -ForegroundColor DarkGray
     }

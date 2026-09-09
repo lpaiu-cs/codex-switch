@@ -68,7 +68,9 @@ refresh token 은 1회용이다. 활성 계정이 쓰는 동안 저장소에 복
 
 ## 4. Stop-Codex (프로세스 정지)
 
-claude-switch 의 "프로세스별 자기 증거로 루트 판정 → 부모 맵으로 자손 수집 → PID 로 종료 확인" 구조를 그대로 쓰되 루트 술어만 바꾼다.
+**2026-09-09 수정.** 데스크톱 앱은 `Stop-Process` 로 하나씩 죽이지 않는다. 실측 결과 Codex 의 MSIX 컨테이너는 개별 강제 종료와 해체가 경쟁하면 깨진다: AppModel-Runtime 로그에 "Destroyed Desktop AppX container" 가 0.1초에 600여 건 찍히고, 패키지는 계속 "실행 중"(재등록 시 0x80073D02) 으로 남으며, 이후 모든 활성화는 모듈 0개·스레드 suspended 인 `ChatGPT.exe` 스텁으로 영원히 멈춘다(로그아웃 전까지). 좀비 핸들, 샌드박스 사용자 프로세스, 잠긴 hive 는 모두 배제됐다. 해법은 Windows 가 쓰는 경로로 닫는 것: `Add-AppxPackage -Register -DisableDevelopmentMode -ForceApplicationShutdown <InstallLocation>\AppxManifest.xml`. 컨테이너 전체(앱 + app-server 자식)를 순서대로 종료·해체하며 약 0.4초, 같은 버전 재등록이라 데이터 영향 없음. 같은 호출이 이미 깨진 상태도 복구한다. 실행 후 8초 안에 모듈이 로드된 프로세스가 보이지 않으면 스텁 제거 → 위 호출 → 1회 재시도한다.
+
+컨테이너 밖의 프로세스(터미널 CLI, VS Code 확장, npm 설치본)에는 claude-switch 의 "프로세스별 자기 증거로 루트 판정 → 부모 맵으로 자손 수집 → PID 로 종료 확인" 구조를 그대로 쓰되 루트 술어만 바꾼다.
 
 루트 판정 (ExecutablePath 기준):
 - `*\WindowsApps\OpenAI.Codex_*` (앱 본체 `ChatGPT.exe`, 렌더러, crashpad, 번들 `codex.exe`)
