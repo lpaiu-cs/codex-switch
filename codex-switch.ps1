@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Tool version. Kept in sync with the git tag / GitHub release, which is tagged "v$ScriptVersion".
-$ScriptVersion = '1.0.1'
+$ScriptVersion = '1.1.0'
 
 if ($Version) {
   Write-Host "codex-switch $ScriptVersion"
