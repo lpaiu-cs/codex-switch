@@ -5,7 +5,9 @@
   Produces  dist/codex-switch-<version>.zip  containing a single top-level folder
   (codex-switch-<version>/) so that extracting it can't scatter loose files into
   someone's Downloads folder. Every .cmd helper resolves codex-switch.ps1 through
-  %~dp0, so the payload must stay flat inside that one folder.
+  %~dp0, so the payload must stay flat inside that one folder. The macOS script
+  (codex-switch.sh) ships in the same archive; ZIP entries carry no Unix mode bits,
+  so it arrives without its executable bit and is run as `bash codex-switch.sh`.
 
   Usage:
     tools\build-release.ps1                 version taken from $ScriptVersion in codex-switch.ps1
@@ -44,6 +46,18 @@ $match = Select-String -Path $mainScript -Pattern '^\s*\$ScriptVersion\s*=\s*''(
 if (-not $match) { throw "Could not find `$ScriptVersion in $mainScript." }
 $declared = $match.Matches[0].Groups[1].Value
 
+# The macOS script carries its own copy of the version (it has no PowerShell to read this one
+# from). They must agree, or a release would report two different versions depending on the
+# platform it is run on.
+$macScript = Join-Path $repoRoot 'codex-switch.sh'
+if (-not (Test-Path $macScript)) { throw "codex-switch.sh not found at $macScript." }
+$macMatch = Select-String -Path $macScript -Pattern "^\s*SCRIPT_VERSION='([^']+)'" | Select-Object -First 1
+if (-not $macMatch) { throw "Could not find SCRIPT_VERSION in $macScript." }
+$macDeclared = $macMatch.Matches[0].Groups[1].Value
+if ($macDeclared -ne $declared) {
+  throw "Version mismatch between the two scripts: codex-switch.ps1 declares '$declared', codex-switch.sh declares '$macDeclared'."
+}
+
 if ($Version) {
   # Accept a raw git tag like "v1.0.0" so CI can pass the tag name straight through.
   $Version = $Version -replace '^[vV]', ''
@@ -59,15 +73,15 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$') {
   throw "Version '$Version' is not valid semver (expected e.g. 1.0.0)."
 }
 
-# Everything a user needs lives in the repo root: the script, the .cmd helpers (including the
+# Everything a user needs lives in the repo root: both scripts, the .cmd helpers (including the
 # Korean start-here launcher), the docs (including the Korean manual), and the licence.
 $rootFiles = @(Get-ChildItem -LiteralPath $repoRoot -File | Where-Object {
-  $_.Extension -in @('.cmd', '.md', '.ps1') -or $_.Name -eq 'LICENSE'
+  $_.Extension -in @('.cmd', '.md', '.ps1', '.sh') -or $_.Name -eq 'LICENSE'
 })
 
 # Guards: a rename or a missing file must fail the build loudly, not ship a broken archive.
-$required = @('codex-switch.ps1', '1-main.cmd', '2-work.cmd', 'list.cmd', 'menu.cmd', 'status.cmd',
-              'stop.cmd', 'README.md', 'CHANGELOG.md', 'LICENSE')
+$required = @('codex-switch.ps1', 'codex-switch.sh', '1-main.cmd', '2-work.cmd', 'list.cmd',
+              'menu.cmd', 'status.cmd', 'stop.cmd', 'README.md', 'CHANGELOG.md', 'LICENSE')
 $names    = @($rootFiles | ForEach-Object { $_.Name })
 $missing  = @($required | Where-Object { $names -notcontains $_ })
 if ($missing.Count) { throw "Missing release file(s): $($missing -join ', ')" }

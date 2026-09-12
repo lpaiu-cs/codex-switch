@@ -1,4 +1,4 @@
-Windows에서 **Codex(데스크톱 앱 · CLI · VS Code 확장)의 여러 ChatGPT 계정을 번갈아 쓰는** 도구입니다.
+Windows·macOS에서 **Codex(데스크톱 앱 · CLI · VS Code 확장)의 여러 ChatGPT 계정을 번갈아 쓰는** 도구입니다.
 계정을 바꿔도 로그인이 유지되고, 대화 기록과 설정은 그대로 공유됩니다.
 
 ---
@@ -19,16 +19,32 @@ Windows에서 **Codex(데스크톱 앱 · CLI · VS Code 확장)의 여러 ChatG
 
 ### 필요한 것
 
-- Windows 10 / 11
-- Codex 에 한 번 이상 로그인한 상태 (Microsoft Store 앱 또는 터미널 CLI 어느 쪽이든)
+- Windows 10 / 11 (macOS 는 아래 참고)
+- Codex 에 한 번 이상 로그인한 상태 (데스크톱 앱 또는 터미널 CLI 어느 쪽이든)
 - Windows PowerShell 5.1 (Windows에 기본 포함 — 따로 설치할 필요 없습니다)
+
+---
+
+## macOS
+
+`codex-switch.sh` 가 같은 도구의 macOS 판입니다. 옵션 표기만 `--flag` 이고 나머지는 같습니다.
+
+```bash
+git clone https://github.com/lpaiu-cs/codex-switch.git
+cd codex-switch
+./codex-switch.sh --menu
+```
+
+zip 을 받았다면 압축을 푼 폴더에서 `bash codex-switch.sh --menu` 로 실행하세요. zip 은 실행
+권한을 보존하지 않습니다.
 
 ---
 
 ## For developers
 
 Download `codex-switch-{{VERSION}}.zip`, extract it anywhere, and run `menu.cmd` or call
-`codex-switch.ps1` directly. `codex-switch.ps1 -Version` reports the version.
+`codex-switch.ps1` directly (`bash codex-switch.sh` on macOS). Both report their version with
+`-Version` / `--version`.
 
 ```powershell
 .\codex-switch.ps1 <name>            # switch to <name>, then launch Codex

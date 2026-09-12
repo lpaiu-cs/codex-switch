@@ -2,7 +2,7 @@
 
 # codex-switch
 
-**Use more than one ChatGPT account with Codex on Windows.**
+**Use more than one ChatGPT account with Codex on Windows and macOS.**
 
 Switch in a second, stay logged in, keep your threads and settings.
 
@@ -38,12 +38,13 @@ apps store an account very differently. See [docs/DESIGN.md](docs/DESIGN.md) for
 
 ## Quick start
 
-**You need:** Windows 10/11 · Codex logged in at least once, via the **Codex desktop app** (Microsoft
-Store) or the **`codex` CLI** in a terminal. Either works; both share the same login.
+**You need:** Windows 10/11 or macOS · Codex logged in at least once, via the **Codex desktop app**
+(Microsoft Store on Windows, `ChatGPT.app` on macOS) or the **`codex` CLI** in a terminal. Either
+works; both share the same login.
 
-Windows PowerShell 5.1 is already on your machine — nothing to install.
+Nothing to install either way: Windows already has PowerShell 5.1, macOS already has bash.
 
-### Option A — download (no developer tools)
+### Windows — Option A: download (no developer tools)
 
 1. Get `codex-switch-<version>.zip` from the [latest release](https://github.com/lpaiu-cs/codex-switch/releases/latest).
 2. Right-click the zip → **Extract All**. Running it from inside the zip does not work.
@@ -54,7 +55,7 @@ up for any script downloaded from the internet.
 
 The zip also contains **`사용설명서.md`**, a plain-language Korean walkthrough.
 
-### Option B — clone
+### Windows — Option B: clone
 
 ```powershell
 git clone https://github.com/lpaiu-cs/codex-switch.git
@@ -64,6 +65,19 @@ cd codex-switch
 
 Either way, **keep the files together in one folder** — each `.cmd` finds `codex-switch.ps1` next
 to itself.
+
+### macOS
+
+```bash
+git clone https://github.com/lpaiu-cs/codex-switch.git
+cd codex-switch
+./codex-switch.sh --menu
+```
+
+`codex-switch.sh` is the macOS build of the same tool: same profiles, same store, same menu, with
+`--flags` instead of `-Flags`. It needs no other file, so copy it wherever you like. From the
+release zip rather than a clone, start it as `bash codex-switch.sh --menu` — ZIP entries carry no
+executable bit.
 
 On the first run, your current login is labelled `main` and becomes your first profile. Nothing is
 copied or deleted.
@@ -89,6 +103,8 @@ Names allow **1–64** characters: letters, digits, `.`, `-`, `_`. No spaces or 
 
 ## Everyday use
 
+### Windows
+
 Double-click any of these:
 
 | File | What it does |
@@ -102,6 +118,16 @@ Double-click any of these:
 | `stop.cmd` | Fully close Codex: the desktop app **and every `codex` CLI session** |
 
 To add a launcher for another profile, copy `2-work.cmd` and change the name inside.
+
+### macOS
+
+```bash
+./codex-switch.sh --menu    # the menu: pick a profile by number, or add one
+./codex-switch.sh work      # jump straight to `work`, then launch Codex
+./codex-switch.sh --list    # profiles with e-mail / plan, and which one is active
+./codex-switch.sh --status  # who is logged in right now, and how fresh the token is
+./codex-switch.sh --stop    # fully close Codex: the app and every codex CLI session
+```
 
 **Switching closes Codex everywhere** — the desktop app, `codex` running in terminals, the VS Code
 extension's background server, and anything those sessions were running. Finish or pause in-flight
@@ -118,6 +144,16 @@ work first.
 .\codex-switch.ps1 -Status           # active account, auth mode, last token refresh
 .\codex-switch.ps1 -Stop             # fully close the Codex app + every codex.exe
 .\codex-switch.ps1 -Version          # print this copy's version
+```
+
+```bash
+./codex-switch.sh <name>              # switch to <name>, then launch the Codex app
+./codex-switch.sh <name> --no-launch  # switch only (CLI users)
+./codex-switch.sh --menu              # interactive numbered menu
+./codex-switch.sh --list              # list profiles (e-mail / plan) and the active one
+./codex-switch.sh --status            # active account, auth mode, last token refresh
+./codex-switch.sh --stop              # fully close the Codex app + every codex process
+./codex-switch.sh --version           # print this copy's version
 ```
 
 Switching to a name that doesn't exist creates an empty profile — the same thing `N` does in the
@@ -146,6 +182,8 @@ So codex-switch never touches your home folder except for that file:
 %USERPROFILE%\.codex-profiles\<name>\profile.json  ← e-mail / plan cache for listings
 %USERPROFILE%\.codex-profiles\active.txt           ← active marker
 ```
+
+On macOS the same four paths live under `~/.codex/` and `~/.codex-profiles/`.
 
 A switch is: close Codex → move the live `auth.json` into the outgoing profile's folder → move
 the target's `auth.json` in → launch. Your threads, memories and settings are the same on every
@@ -177,10 +215,17 @@ and if it ever sees a launch stall that way it repairs the container and retries
 Only processes living outside the container — `codex` in terminals, the VS Code extension, npm
 installs — are stopped per process.
 
+**macOS has no such container.** The app bundle, its renderers and its `codex` app-server are
+ordinary processes, so every one of them (plus terminal CLI sessions and the VS Code extension's
+server) gets SIGTERM first, so the app can flush its state, and SIGKILL only if it is still standing
+two seconds later. The same verify-by-PID loop then confirms nothing survived.
+
 <details>
 <summary><b>What "stop" matches, and what it leaves alone</b></summary>
 
-Every process is judged on its own image path, then its descendants are swept:
+Every process is judged on its own image path, then its descendants are swept.
+
+Windows:
 
 - the Store app: `WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe` and its renderers / helpers
 - `codex.exe`, `codex-code-mode-host.exe`, `node.exe`, `node_repl.exe` under `%LOCALAPPDATA%\OpenAI\Codex`
@@ -188,9 +233,20 @@ Every process is judged on its own image path, then its descendants are swept:
 - the VS Code extension's bundled `codex.exe`, npm-installed CLIs (`node.exe` running `codex.js`)
 - any other `codex.exe` you started in a terminal
 
-**Not** matched: the regular ChatGPT desktop app (`OpenAI.ChatGPT-Desktop`). Its executable is also
-named `ChatGPT.exe`, which is exactly why matching is by path, not name. The shell you ran the
-script from is protected too, even if Codex spawned it.
+macOS:
+
+- the desktop app, found by its **bundle id `com.openai.codex`** (it installs as `ChatGPT.app`),
+  plus anything under a `Codex Framework.framework` — which catches a second or renamed copy of the
+  app wherever it lives, and brings the bundle's main process with it
+- helpers Codex materialises inside `~/.codex` (`bin/`, `.sandbox-bin/`, the computer-use service,
+  plugin hosts) and runtimes under `~/.cache/codex-runtimes`
+- the VS Code extension's bundled `codex`, npm installs (`node` running `codex.js`), and any
+  `codex` / `codex-app-server` / `codex-command-runner` you started in a terminal
+
+**Not** matched, on either platform: the regular ChatGPT desktop app — `OpenAI.ChatGPT-Desktop` on
+Windows, `com.openai.chat` on macOS. Both ship an executable called ChatGPT, which is exactly why
+matching is by path and bundle id, never by name. The shell you ran the script from is protected
+too, even if Codex spawned it.
 
 </details>
 
@@ -209,10 +265,11 @@ refreshes it on the next start.
 | --- | --- |
 | Switch fails with *still running* | Something held on. Run `stop.cmd`, then retry. |
 | Codex never opens after a switch (no window, one `ChatGPT.exe` in Task Manager) | Windows still counts the old instance as running. codex-switch repairs this by itself on launch; if it still fails, run `stop.cmd` once more and relaunch. Upgrading from 1.0.0 fixes the cause. |
-| `cli_auth_credentials_store = "keyring"` error | Codex is set to keep credentials in the OS keyring instead of `auth.json`. Remove that line from `~\.codex\config.toml` (or set it to `"file"`), log in again, retry. |
+| `cli_auth_credentials_store = "keyring"` error | Codex is set to keep credentials in the OS keyring / macOS Keychain instead of `auth.json`. Remove that line from `~\.codex\config.toml` (`~/.codex/config.toml` on macOS) or set it to `"file"`, log in again, retry. |
 | Codex opens signed out on a profile that used to work | The refresh token was spent elsewhere (e.g. `codex login`/`logout` ran under that profile, or an old copy of `auth.json` was restored by hand). Log in again once; the profile is repaired. |
 | New profile logs in as the *old* account | Your browser's ChatGPT session was reused. Sign out on chatgpt.com or use a private window, then retry `N`. |
 | Window flashes and vanishes | You ran it from inside the zip. Extract it to a folder first. |
+| macOS: `permission denied: ./codex-switch.sh` | The executable bit was lost (ZIP archives don't keep it). Run `bash codex-switch.sh`, or `chmod +x codex-switch.sh` once. |
 | `another codex-switch operation is in progress` | A previous run died mid-way. Wait 5 minutes and the stale lock clears itself. |
 | Not sure what's going on | Run `status.cmd` (who is logged in) or `list.cmd` (all profiles). |
 
@@ -224,13 +281,14 @@ refreshes it on the next start.
 - **Never calls `codex login` / `codex logout`.** Those revoke tokens server-side.
 - **Won't run under a lock.** If Codex can't be closed, the switch aborts before touching files.
 - **Rollback on failure.** A failed activation moves the previous login back into place.
-- **Store is locked down.** `.codex-profiles` is ACL-restricted to your user account (Codex sets
-  no Windows permissions on `auth.json` itself).
+- **Store is locked down.** `.codex-profiles` is ACL-restricted to your user account on Windows
+  (Codex sets no permissions on `auth.json` there), and `chmod 700` on macOS, where Codex already
+  writes `auth.json` as `0600`.
 - **Name validation** and a **concurrency lock**, same as claude-switch.
 
 ## Caveats
 
-- Windows only. Codex desktop (Store) **or** the CLI — either is fine.
+- Windows and macOS. Codex desktop **or** the CLI — either is fine. Linux is not covered yet.
 - Threads and settings are **shared** across your accounts, by design. Thread titles and transcripts
   from one account are visible in the picker while another is active (locally — they are not sent
   anywhere). A planned `-Isolated` mode will park thread history per profile for people who need
@@ -244,7 +302,8 @@ refreshes it on the next start.
 <summary><b>For maintainers — cutting a release</b></summary>
 
 Versions follow [SemVer](https://semver.org/). `$ScriptVersion` in `codex-switch.ps1` is the single
-source of truth, and the tag must match it — the build fails otherwise.
+source of truth, and the tag must match it — the build fails otherwise. `SCRIPT_VERSION` in
+`codex-switch.sh` must carry the same number; the build and CI both fail on a drift.
 
 1. Bump `$ScriptVersion` and add the matching `CHANGELOG.md` entry.
 2. Commit, then tag and push:
@@ -252,8 +311,10 @@ source of truth, and the tag must match it — the build fails otherwise.
    git tag -a v1.0.0 -m "codex-switch v1.0.0"
    git push origin v1.0.0
    ```
-3. The `Release` workflow builds `dist/codex-switch-<version>.zip`, smoke-tests `-Version`,
-   verifies the archive contents, and publishes the GitHub Release with the zip and its `.sha256`.
+3. The `Release` workflow first runs the macOS job (`bash -n`, `tools/test-codex-switch.sh` and the
+   version agreement between the two scripts), then builds `dist/codex-switch-<version>.zip`,
+   smoke-tests `-Version`, verifies the archive contents, and publishes the GitHub Release with the
+   zip and its `.sha256`.
 
 Build locally without tagging:
 
@@ -261,9 +322,9 @@ Build locally without tagging:
 .\tools\build-release.ps1
 ```
 
-The archive ships only what an end user needs: `codex-switch.ps1`, the `.cmd` helpers,
-`시작하기.cmd`, `사용설명서.md`, `README.md`, `CHANGELOG.md`, `LICENSE`. `docs/`, `tools/` and
-`.github/` are excluded.
+The archive ships only what an end user needs: `codex-switch.ps1`, `codex-switch.sh`, the `.cmd`
+helpers, `시작하기.cmd`, `사용설명서.md`, `README.md`, `CHANGELOG.md`, `LICENSE`. `docs/`, `tools/`
+and `.github/` are excluded.
 
 </details>
 
@@ -281,7 +342,7 @@ The archive ships only what an end user needs: `codex-switch.ps1`, the `.cmd` he
 
 [English](#codex-switch)
 
-**Windows에서 Codex의 ChatGPT 계정을 여러 개 쓰는 도구입니다.**
+**Windows·macOS에서 Codex의 ChatGPT 계정을 여러 개 쓰는 도구입니다.**
 
 1초 만에 전환되고, 로그인이 유지되고, 대화 기록과 설정은 그대로 공유됩니다.
 
@@ -311,12 +372,13 @@ Select:
 
 ## 빠르게 시작하기
 
-**필요한 것:** Windows 10/11 · Codex에 한 번 이상 로그인한 상태. **Codex 데스크톱 앱(Microsoft
-Store)** 이든 터미널의 **`codex` CLI** 든 상관없습니다. 둘은 같은 로그인을 공유합니다.
+**필요한 것:** Windows 10/11 또는 macOS · Codex에 한 번 이상 로그인한 상태. **Codex 데스크톱 앱**
+(Windows는 Microsoft Store, macOS는 `ChatGPT.app`)이든 터미널의 **`codex` CLI** 든 상관없습니다.
+둘은 같은 로그인을 공유합니다.
 
-Windows PowerShell 5.1은 이미 컴퓨터에 있습니다. 설치할 것은 없습니다.
+따로 설치할 것은 없습니다. Windows에는 PowerShell 5.1이, macOS에는 bash가 이미 있습니다.
 
-### 방법 A — 내려받기 (개발 도구 필요 없음)
+### Windows — 방법 A: 내려받기 (개발 도구 필요 없음)
 
 1. [최신 릴리스](https://github.com/lpaiu-cs/codex-switch/releases/latest)에서
    `codex-switch-<버전>.zip` 을 받습니다.
@@ -328,7 +390,7 @@ Windows PowerShell 5.1은 이미 컴퓨터에 있습니다. 설치할 것은 없
 
 압축 안에는 터미널을 쓰지 않는 분을 위한 단계별 안내서 **`사용설명서.md`** 도 함께 들어 있습니다.
 
-### 방법 B — clone
+### Windows — 방법 B: clone
 
 ```powershell
 git clone https://github.com/lpaiu-cs/codex-switch.git
@@ -338,6 +400,19 @@ cd codex-switch
 
 어느 방법이든 **파일은 같은 폴더에 함께 두세요.** 각 `.cmd` 는 자기 옆에 있는 `codex-switch.ps1`
 을 찾습니다.
+
+### macOS
+
+```bash
+git clone https://github.com/lpaiu-cs/codex-switch.git
+cd codex-switch
+./codex-switch.sh --menu
+```
+
+`codex-switch.sh` 가 같은 도구의 macOS 판입니다. 프로필·저장소·메뉴가 모두 같고 옵션 표기만
+`-Flag` 대신 `--flag` 입니다. 다른 파일이 필요 없으니 원하는 곳에 복사해 두고 써도 됩니다.
+clone 대신 릴리스 zip 을 받았다면 `bash codex-switch.sh --menu` 로 실행하세요. zip 은 실행
+권한을 보존하지 않습니다.
 
 처음 실행하면 지금 로그인된 계정이 `main` 이라는 이름을 받고 첫 번째 프로필이 됩니다. 복사하거나
 지우는 것은 없습니다.
@@ -363,6 +438,8 @@ cd codex-switch
 
 ## 평소 사용법
 
+### Windows
+
 아래 파일을 두 번 클릭하면 됩니다.
 
 | 파일 | 하는 일 |
@@ -376,6 +453,16 @@ cd codex-switch
 | `stop.cmd` | Codex 완전 종료 — 데스크톱 앱과 **모든 `codex` CLI 세션** |
 
 다른 프로필용 실행기가 필요하면 `2-work.cmd` 를 복사해 안의 이름만 바꾸세요.
+
+### macOS
+
+```bash
+./codex-switch.sh --menu    # 메뉴 — 번호로 프로필 선택 또는 추가
+./codex-switch.sh work      # `work` 으로 바로 전환하고 Codex 실행
+./codex-switch.sh --list    # 프로필 목록(이메일·플랜)과 활성 프로필
+./codex-switch.sh --status  # 지금 로그인된 계정과 토큰 갱신 시각
+./codex-switch.sh --stop    # Codex 완전 종료 — 앱과 모든 codex CLI 세션
+```
 
 **전환하면 Codex가 전부 닫힙니다.** 데스크톱 앱, 터미널의 `codex`, VS Code 확장의 백그라운드
 서버, 그리고 그 세션들이 실행 중이던 작업까지. 진행 중인 작업은 먼저 마무리하세요.
@@ -391,6 +478,16 @@ cd codex-switch
 .\codex-switch.ps1 -Status           # 활성 계정, 인증 방식, 마지막 토큰 갱신
 .\codex-switch.ps1 -Stop             # Codex 앱 + 모든 codex.exe 완전 종료
 .\codex-switch.ps1 -Version          # 버전 출력
+```
+
+```bash
+./codex-switch.sh <이름>              # <이름>으로 전환 후 Codex 앱 실행
+./codex-switch.sh <이름> --no-launch  # 전환만 (CLI 사용자)
+./codex-switch.sh --menu              # 번호 선택 메뉴
+./codex-switch.sh --list              # 프로필 목록(이메일·플랜)과 활성 프로필
+./codex-switch.sh --status            # 활성 계정, 인증 방식, 마지막 토큰 갱신
+./codex-switch.sh --stop              # Codex 앱 + 모든 codex 프로세스 완전 종료
+./codex-switch.sh --version           # 버전 출력
 ```
 
 없는 이름으로 전환하면 빈 프로필이 만들어집니다. 메뉴의 `N` 과 같습니다. 데스크톱 앱이 없으면
@@ -418,6 +515,8 @@ Codex는 모든 것을 `%USERPROFILE%\.codex`(`CODEX_HOME`)에 두고, 데스크
 %USERPROFILE%\.codex-profiles\<이름>\profile.json  ← 목록 표시용 이메일·플랜 캐시
 %USERPROFILE%\.codex-profiles\active.txt           ← 활성 마커
 ```
+
+macOS에서는 같은 네 경로가 `~/.codex/` 와 `~/.codex-profiles/` 아래에 있습니다.
 
 전환은 "Codex 종료 → 라이브 `auth.json` 을 나가는 프로필 폴더로 이동 → 대상 프로필의
 `auth.json` 을 라이브로 이동 → 실행" 입니다. 대화·메모리·설정은 원래 계정별이 아니었기 때문에
@@ -447,10 +546,17 @@ Codex에서는 컨테이너 해체와 경쟁이 생겨, Windows가 패키지를 
 혹시 그런 식으로 실행이 멈추면 컨테이너를 복구해 한 번 더 시도합니다. 컨테이너 밖에 사는 프로세스
 (터미널의 `codex`, VS Code 확장, npm 설치본)만 프로세스 단위로 닫습니다.
 
+**macOS에는 그런 컨테이너가 없습니다.** 앱 번들과 렌더러, `codex` app-server 모두 평범한
+프로세스이므로 (터미널 CLI 세션과 VS Code 확장 서버까지 함께) 먼저 SIGTERM 을 보내 앱이 상태를
+저장할 기회를 주고, 2초 뒤에도 남아 있는 것만 SIGKILL 합니다. 그 뒤 PID 단위로 정말 사라졌는지
+확인하는 것은 Windows와 같습니다.
+
 <details>
 <summary><b>"종료"가 잡는 것과 놔두는 것</b></summary>
 
 각 프로세스를 자기 실행 파일 경로로 판정하고, 그 자손을 모두 쓸어 담습니다.
+
+Windows:
 
 - Store 앱: `WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe` 와 렌더러·헬퍼
 - `%LOCALAPPDATA%\OpenAI\Codex` 아래의 `codex.exe`, `codex-code-mode-host.exe`, `node.exe`, `node_repl.exe`
@@ -458,9 +564,19 @@ Codex에서는 컨테이너 해체와 경쟁이 생겨, Windows가 패키지를 
 - VS Code 확장이 번들한 `codex.exe`, npm 설치 CLI(`codex.js` 를 돌리는 `node.exe`)
 - 터미널에서 직접 실행한 그 밖의 `codex.exe`
 
-일반 ChatGPT 데스크톱 앱(`OpenAI.ChatGPT-Desktop`)은 **잡지 않습니다.** 실행 파일 이름이 똑같이
-`ChatGPT.exe` 라서, 이름이 아니라 경로로 판정하는 이유가 바로 이것입니다. 스크립트를 실행한 셸도
-Codex가 띄운 것이든 아니든 보호됩니다.
+macOS:
+
+- 데스크톱 앱: **번들 ID `com.openai.codex`** 로 찾습니다(디스크에는 `ChatGPT.app` 이라는 이름으로
+  설치됩니다). 여기에 더해 `Codex Framework.framework` 아래의 프로세스도 잡으므로, 앱이 다른
+  위치에 있거나 이름이 바뀌었거나 예전 복사본이 남아 있어도 본체까지 함께 걸립니다
+- Codex가 `~/.codex` 안에 풀어 놓는 헬퍼(`bin/`, `.sandbox-bin/`, computer-use 서비스, 플러그인
+  호스트)와 `~/.cache/codex-runtimes` 아래의 런타임
+- VS Code 확장이 번들한 `codex`, npm 설치본(`codex.js` 를 돌리는 `node`), 터미널에서 직접 실행한
+  `codex` / `codex-app-server` / `codex-command-runner`
+
+일반 ChatGPT 데스크톱 앱은 **양쪽 모두에서 잡지 않습니다** — Windows의 `OpenAI.ChatGPT-Desktop`,
+macOS의 `com.openai.chat`. 둘 다 실행 파일 이름이 ChatGPT 라서, 이름이 아니라 경로와 번들 ID로
+판정하는 이유가 바로 이것입니다. 스크립트를 실행한 셸도 Codex가 띄운 것이든 아니든 보호됩니다.
 
 </details>
 
@@ -479,10 +595,11 @@ Codex가 띄운 것이든 아니든 보호됩니다.
 | --- | --- |
 | *still running* 오류로 전환 실패 | 무언가 남아 있습니다. `stop.cmd` 를 실행한 뒤 다시 시도하세요. |
 | 전환 후 Codex가 안 열림 (창 없음, 작업 관리자에 `ChatGPT.exe` 하나) | Windows가 이전 인스턴스를 아직 실행 중으로 봅니다. codex-switch가 실행 시 스스로 복구합니다. 그래도 안 되면 `stop.cmd` 를 한 번 더 실행하고 다시 여세요. 1.0.0에서 올라오면 원인 자체가 사라집니다. |
-| `cli_auth_credentials_store = "keyring"` 오류 | Codex가 자격증명을 `auth.json` 대신 OS 키링에 두도록 설정돼 있습니다. `~\.codex\config.toml` 에서 그 줄을 지우거나 `"file"` 로 바꾸고, 다시 로그인한 뒤 재시도하세요. |
+| `cli_auth_credentials_store = "keyring"` 오류 | Codex가 자격증명을 `auth.json` 대신 OS 키링(macOS는 키체인)에 두도록 설정돼 있습니다. `~\.codex\config.toml`(macOS는 `~/.codex/config.toml`)에서 그 줄을 지우거나 `"file"` 로 바꾸고, 다시 로그인한 뒤 재시도하세요. |
 | 잘 되던 프로필인데 Codex가 로그아웃 상태로 열림 | refresh token 이 다른 곳에서 소모됐습니다(그 프로필에서 `codex login`/`logout` 을 실행했거나, 예전 `auth.json` 복사본을 수동으로 되돌린 경우). 한 번 다시 로그인하면 프로필이 복구됩니다. |
 | 새 프로필인데 *예전* 계정으로 로그인됨 | 브라우저의 ChatGPT 세션이 재사용됐습니다. chatgpt.com 에서 로그아웃하거나 시크릿 창을 쓰고 `N` 을 다시 하세요. |
 | 창이 열렸다가 바로 사라짐 | zip 안에서 실행한 경우입니다. 폴더로 압축을 푼 뒤 실행하세요. |
+| macOS: `permission denied: ./codex-switch.sh` | 실행 권한이 없습니다(zip 은 권한을 보존하지 않습니다). `bash codex-switch.sh` 로 실행하거나 `chmod +x codex-switch.sh` 를 한 번 해 주세요. |
 | `another codex-switch operation is in progress` | 이전 실행이 도중에 죽었습니다. 5분 기다리면 오래된 락이 자동으로 풀립니다. |
 | 뭐가 뭔지 모르겠음 | `status.cmd`(지금 로그인된 계정) 또는 `list.cmd`(전체 프로필)를 실행해 보세요. |
 
@@ -494,12 +611,12 @@ Codex가 띄운 것이든 아니든 보호됩니다.
 - **`codex login` / `codex logout` 을 대신 실행하지 않습니다.** 서버에서 토큰을 폐기하는 명령입니다.
 - **잠긴 상태에서는 실행하지 않습니다.** Codex를 닫지 못하면 파일을 건드리기 전에 중단합니다.
 - **실패 시 롤백.** 활성화에 실패하면 이전 로그인을 제자리로 되돌립니다.
-- **저장소 권한 제한.** `.codex-profiles` 는 현재 사용자 계정만 접근하도록 ACL을 설정합니다(Codex 자체는 `auth.json` 에 Windows 권한을 설정하지 않습니다).
+- **저장소 권한 제한.** `.codex-profiles` 는 Windows에서는 현재 사용자 계정만 접근하도록 ACL을 설정하고(Codex 자체는 `auth.json` 에 Windows 권한을 설정하지 않습니다), macOS에서는 `chmod 700` 입니다(macOS의 Codex는 `auth.json` 을 이미 `0600` 으로 씁니다).
 - **이름 검증**과 **동시 실행 락**은 claude-switch와 같습니다.
 
 ## 알아둘 점
 
-- Windows 전용. Codex 데스크톱(Store) **또는** CLI, 어느 쪽이든 됩니다.
+- Windows 와 macOS. Codex 데스크톱 **또는** CLI, 어느 쪽이든 됩니다. Linux는 아직 지원하지 않습니다.
 - 대화와 설정은 계정 간에 **공유**됩니다. 설계상 그렇습니다. 한 계정의 대화 제목과 본문이 다른
   계정이 활성일 때도 목록에 보입니다(로컬 파일이며 어디로도 전송되지 않습니다). 분리가 필요한
   분을 위해 대화 기록을 프로필별로 보관하는 `-Isolated` 모드를 후속으로 계획하고 있습니다.

@@ -1,7 +1,7 @@
 # codex-switch 설계
 
 Windows에서 Codex(데스크톱 앱 + CLI + IDE 확장)의 ChatGPT 계정을 여러 개 유지하고 1초 안에
-전환하는 도구. [claude-switch](https://github.com/lpaiu-cs/claude-switch)와 같은 사용자 경험
+전환하는 도구(macOS 이식은 §9). [claude-switch](https://github.com/lpaiu-cs/claude-switch)와 같은 사용자 경험
 (메뉴, `.cmd` 런처, `-Stop`, 롤백, 락)을 제공하되, 내부 구조는 두 하네스의 차이에 맞춰 다시 설계한다.
 
 작성일 2026-09-08. 조사 대상: Codex CLI 0.151.0, Codex 데스크톱 26.901.6511.0 (MSIX), 로컬 확인 + 소스 조사.
@@ -151,3 +151,61 @@ CLI: `codex-switch.ps1 <name> [-NoLaunch]`, `-Menu`, `-List`, `-Stop`, `-Status`
 5. `-Menu`, `-List`, `-Status`, `.cmd` 런처, `시작하기.cmd`.
 6. 검증 시나리오: (a) 두 계정 왕복 후 각 계정에서 `codex login status` 와 앱 계정 표시 확인, (b) 전환 후 refresh 발생(앱 실행 4초 뒤 `last_refresh` 갱신) 뒤 다시 돌아와도 로그인 유지, (c) 터미널 `codex` 실행 중 전환 시 정지·안내, (d) 앱 미설치 환경에서 CLI-only 동작, (e) 8일 이상 묵힌 프로필 재로그인 안내.
 7. README(영/한), `사용설명서.md`, CHANGELOG, 릴리스 워크플로 이식.
+
+---
+
+## 9. macOS 이식 (1.1.0)
+
+작성일 2026-09-12. 조사 대상: Codex 데스크톱 26.831.21537(`/Applications/ChatGPT.app`), 로컬 확인.
+
+계정 데이터 쪽은 이식할 것이 없었다. `CODEX_HOME` 기본값이 `~/.codex` 로 같고, `auth.json` 구조
+(`auth_mode`, `last_refresh`, `tokens.id_token`)도 같고, 앱 번들 안의 `Contents/Resources/codex`
+가 그대로 app-server 다(바이너리에서 `CODEX_HOME`·`auth.json` 문자열 확인). 그래서 §2 레이아웃과
+§3 전환 알고리즘은 한 글자도 바뀌지 않는다. 다시 쓴 것은 OS 표면뿐이다.
+
+| 항목 | Windows | macOS |
+| --- | --- | --- |
+| 앱 식별 | 패키지 `OpenAI.Codex` | 번들 ID `com.openai.codex` (디스크 이름은 `ChatGPT.app`) |
+| 건드리면 안 되는 형제 앱 | `OpenAI.ChatGPT-Desktop` | `com.openai.chat` (`ChatGPT Classic.app`) |
+| 정지 | AppX 배포 API로 컨테이너 종료 | 컨테이너 없음 → SIGTERM 후 SIGKILL |
+| 실행 | `shell:AppsFolder\<aumid>` | `open -b com.openai.codex` |
+| 저장소 권한 | `icacls` | `chmod 700` (Codex가 auth.json 을 이미 0600으로 씀) |
+| JSON·JWT | `ConvertFrom-Json` | `plutil` + `base64 -D` |
+
+**프로세스 매칭.** 루트 판정 원칙은 그대로 "각 프로세스의 자기 실행 경로"다. 번들 경로,
+`$CODEX_HOME/*`, `~/.cache/codex-runtimes/*`, VS Code 확장, npm 설치본, 그리고 basename
+(`codex`, `codex-app-server`, `codex-command-runner` …). 여기에 macOS 고유로 두 가지를 더한다.
+
+- `*/Codex Framework.framework/*` — Electron 프레임워크 이름이 제품명을 따른다. 일반 ChatGPT 앱은
+  `ChatGPT.framework` 라서 오살 위험이 없고, 앱이 다른 위치에 있거나 이름이 바뀌어도 잡힌다.
+  실제로 테스트 머신에는 이름이 바뀌기 전 `Codex.app`(149.x)의 crashpad 프로세스가 남아 있었고,
+  이 규칙으로만 잡혔다.
+- 매칭된 경로에서 번들 루트(`…/Foo.app`)를 역산해 같은 번들의 나머지 프로세스도 넣는다. 앱 본체는
+  헬퍼의 **부모**라서 자손 스윕만으로는 놓치고, 놓치면 살아 있는 앱 밑에서 `auth.json` 을 바꾸게
+  된다 — §1과 §3이 금지하는 바로 그 상황이다.
+
+**정지 방식.** MSIX 컨테이너가 없으니 1.0.1의 패키지 종료·스텁 복구는 대응물 자체가 없다. SIGTERM
+을 먼저 보내 앱이 상태를 정리할 기회를 주고, 2초 뒤에도 남은 것만 SIGKILL 한다. 본 PID 기준으로
+확인하는 검증 루프는 그대로다.
+
+**도구 선택.** `plutil` 은 모든 Mac 에 있고 JSON 을 읽으므로 jq·python 의존이 생기지 않는다. 다만
+`plutil -lint` 는 plist 전용이라 정상 JSON 을 거부한다 — 유효성 검사는
+`plutil -convert json -o /dev/null` 로 한다. `id_token` 클레임의 `https://api.openai.com/auth` 는
+키 이름에 점이 있어 keypath 로 꺼낼 수 없으므로, 디코드된 한 줄 JSON 에서 `sed` 로 두 필드만 뽑는다.
+
+**락.** `set -o noclobber` + 리다이렉트(= `O_EXCL`)로 Windows 판과 같은 파일 이름을 쓴다. mkdir 락
+으로 하면 저장소 목록에 디렉터리 하나가 프로필처럼 섞인다.
+
+**검증.** `tools/test-codex-switch.sh` 가 버리는 `CODEX_HOME` 에 대고 스태시·활성화, 실패 시 롤백,
+`id_token` 디코드, 이름 검증, keyring 거부를 확인한다(프로세스는 건드리지 않는다). 릴리스
+워크플로가 macOS 잡에서 이것과 두 스크립트의 버전 일치를 먼저 돌리고, 통과해야 zip 을 만든다.
+
+### 검토 후 버린 대안
+
+- **`codex-switch.ps1` 을 pwsh 로 크로스플랫폼화**: 4 KB 파일 하나 옮기자고 PowerShell 7 설치를
+  요구하게 된다. 정지·실행·권한은 어차피 플랫폼별 분기라 공유되는 것은 알고리즘뿐이고, 그
+  알고리즘의 정본은 코드가 아니라 이 문서다.
+- **`시작하기.command` 더블클릭 런처**: zip 은 실행 권한을 보존하지 않아 Finder 더블클릭은 받는
+  즉시 실패한다. 권한을 주려면 어차피 터미널을 열어야 하니, 터미널 한 줄로 안내하는 편이 정직하다.
+- **Linux**: CLI 경로는 비슷하지만 데스크톱 앱·프로세스 트리를 확인할 환경이 없어 넣지 않았다.
+  넣는다면 `is_codex_path` 의 번들 규칙만 교체하면 된다.

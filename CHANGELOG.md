@@ -3,8 +3,36 @@
 All notable changes to this project are documented here.
 
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Release tags are `v<version>` (e.g. `v1.0.0`), and `codex-switch.ps1 -Version` reports the
-version of the copy you have.
+Release tags are `v<version>` (e.g. `v1.0.0`); `codex-switch.ps1 -Version` and
+`codex-switch.sh --version` report the version of the copy you have.
+
+## [1.1.0] - 2026-09-12
+
+### Added
+
+- **macOS support** — `codex-switch.sh`, the same tool with `--flags` instead of `-Flags`, sharing
+  the profile store, the layout and the move-never-copy rule with the Windows script (which is
+  unchanged). Nothing to install: bash, `plutil` and `base64` ship with macOS.
+  - The desktop app is resolved by **bundle id `com.openai.codex`**. On macOS it installs as
+    `ChatGPT.app` - the same file name the regular ChatGPT app (`com.openai.chat`) uses, and that
+    one is never touched. Processes are also matched through `Codex Framework.framework`, so a
+    second, older or relocated copy of the app is found wherever it lives, and its main process
+    with it.
+  - macOS has no MSIX container, so 1.0.1's package shutdown and wedged-launch repair have no
+    counterpart here: every Codex process gets SIGTERM, so the app can flush its state, then
+    SIGKILL if it is still standing ~2 s later, verified against the concrete PIDs as before.
+  - Account e-mail / plan / refresh age are decoded from the `id_token` exactly as on Windows,
+    using `plutil` and `base64` instead of PowerShell's JSON parser. Still no network call.
+  - The profile store is `chmod 700`; Codex already writes `auth.json` as `0600` on Unix.
+- **`tools/test-codex-switch.sh`** — self-check for the macOS build: stash / activate, the rollback
+  when activation fails, the `id_token` decode, name validation and the keyring refusal, all
+  against a throwaway `CODEX_HOME` with no process touched. A new macOS CI job runs it before a
+  release is built, and fails the release if the two scripts declare different versions.
+
+### Changed
+
+- The release archive also carries `codex-switch.sh`. ZIP entries have no Unix mode bits, so from
+  the archive it is started as `bash codex-switch.sh`; a clone keeps the executable bit.
 
 ## [1.0.1] - 2026-09-09
 
