@@ -245,12 +245,20 @@ get_active() { [ -f "$CX_MARKER" ] && tr -d ' \t\r\n' < "$CX_MARKER" || true; }
 set_active() { printf '%s' "$1" > "$CX_MARKER"; }
 
 # Cross-process guard so two overlapping switches can't both move auth.json. `set -o noclobber`
-# makes the redirect an O_EXCL create, which is the atomic part.
+# makes the redirect an O_EXCL create, which is the atomic part. The lock holds the owner's pid so
+# a run that is killed outright - its EXIT trap never fires - leaves a lock the next run can see is
+# dead, instead of one that refuses every retry until a timeout nobody knows about has passed.
+# ponytail: pid liveness, not a real advisory lock - a recycled pid can hold it for one run; reach
+# for flock/shlock only if that ever actually bites.
 acquire_lock() {
-  if [ -e "$CX_LOCK" ] && [ -z "$(find "$CX_LOCK" -maxdepth 0 -mmin -5 2>/dev/null)" ]; then
-    rm -f "$CX_LOCK"   # stale lock from a crashed run
+  if [ -e "$CX_LOCK" ]; then
+    local owner; owner=$(cat "$CX_LOCK" 2>/dev/null || true)
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      die "Another codex-switch operation is in progress (pid $owner, lock: $CX_LOCK). Wait for it to finish, then retry."
+    fi
+    rm -f "$CX_LOCK"   # owner is gone: stale lock from a crashed run
   fi
-  if ( set -o noclobber; : > "$CX_LOCK" ) 2>/dev/null; then
+  if ( set -o noclobber; printf '%s' "$$" > "$CX_LOCK" ) 2>/dev/null; then
     trap 'rm -f "$CX_LOCK"' EXIT INT TERM
   else
     die "Another codex-switch operation is in progress (lock: $CX_LOCK). If it is stale, delete that file and retry."

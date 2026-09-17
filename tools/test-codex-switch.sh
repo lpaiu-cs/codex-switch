@@ -76,6 +76,13 @@ chmod 700 "$CX_STORE/bad"
 [ "$(get_active)" = main ]                               || fail "rollback did not restore the marker"
 [ ! -e "$CX_LOCK" ]                                      || fail "the lock outlived a failed switch"
 
+# --- a lock left by a run that was killed must not block the next one --------------------------
+printf '%s' "$$" > "$CX_LOCK"                   # this shell is alive: a real operation in progress
+( acquire_lock ) 2>/dev/null && fail "a lock held by a live run must be refused" || true
+printf '99999999' > "$CX_LOCK"                  # an owner that cannot be alive: killed mid-run
+( acquire_lock ) || fail "a lock from a killed run must be reclaimed"
+rm -f "$CX_LOCK"
+
 # --- a listing row keeps its fields even when the label is empty -------------------------------
 mkdir -p "$CX_STORE/old"                      # a profile that was never logged in: no label, one note
 row=$(emit_row old "$(get_active)")
