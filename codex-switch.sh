@@ -244,27 +244,36 @@ assert_valid_name() {
 get_active() { [ -f "$CX_MARKER" ] && tr -d ' \t\r\n' < "$CX_MARKER" || true; }
 set_active() { printf '%s' "$1" > "$CX_MARKER"; }
 
-# Cross-process guard so two overlapping switches can't both move auth.json. `set -o noclobber`
-# makes the redirect an O_EXCL create, which is the atomic part. The lock holds the owner's pid so
-# a run that is killed outright - its EXIT trap never fires - leaves a lock the next run can see is
-# dead, instead of one that refuses every retry until a timeout nobody knows about has passed.
-# ponytail: pid liveness, not a real advisory lock - a recycled pid can hold it for one run; reach
-# for flock/shlock only if that ever actually bites.
+# Cross-process guard so two overlapping switches can't both move auth.json. The lock is published
+# with ln(), which is the atomic no-clobber create AND publishes a file that ALREADY holds the
+# owner's pid - there is no instant where the lock exists with nothing in it. That matters: the pid
+# is what lets the next run tell a live operation from one that was killed outright, and a
+# create-then-write lock (`set -o noclobber; printf ... > lock`) leaves a window where a second run
+# reads no owner. Treating that as abandoned lets two switches move auth.json at once, which ends
+# with one profile's only credential overwritten by the other. So an owner we cannot read counts as
+# live, never as stale: refusing is always the safe answer.
+# ponytail: reclaiming a dead owner's lock is still check-then-remove, so two runs starting in the
+# same instant after a crash could both take it - the staleness check this replaced had the same
+# hole. flock/shlock if concurrent users ever become real rather than theoretical.
 acquire_lock() {
-  if [ -e "$CX_LOCK" ]; then
-    local owner; owner=$(cat "$CX_LOCK" 2>/dev/null || true)
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-      die "Another codex-switch operation is in progress (pid $owner, lock: $CX_LOCK). Wait for it to finish, then retry."
+  local tmp owner
+  tmp="$CX_LOCK.$$"
+  printf '%s' "$$" > "$tmp" || die "Cannot write to the profile store ($CX_STORE)."
+  if ! ln "$tmp" "$CX_LOCK" 2>/dev/null; then
+    owner=$(cat "$CX_LOCK" 2>/dev/null || true)
+    if [ -z "$owner" ] || kill -0 "$owner" 2>/dev/null; then
+      rm -f "$tmp"
+      die "Another codex-switch operation is in progress (pid ${owner:-unknown}, lock: $CX_LOCK). Wait for it to finish, then retry."
     fi
-    rm -f "$CX_LOCK"   # owner is gone: stale lock from a crashed run
+    rm -f "$CX_LOCK"   # the owner is gone: a run that was killed before it could clean up
+    if ! ln "$tmp" "$CX_LOCK" 2>/dev/null; then
+      rm -f "$tmp"
+      die "Another codex-switch operation is in progress (lock: $CX_LOCK). Wait for it to finish, then retry."
+    fi
   fi
-  if ( set -o noclobber; printf '%s' "$$" > "$CX_LOCK" ) 2>/dev/null; then
-    trap 'rm -f "$CX_LOCK"' EXIT INT TERM
-  else
-    die "Another codex-switch operation is in progress (lock: $CX_LOCK). If it is stale, delete that file and retry."
-  fi
+  rm -f "$tmp"
+  trap 'rm -f "$CX_LOCK"' EXIT INT TERM
 }
-
 # The store holds plaintext bearer tokens. Codex writes auth.json 0600 and mv preserves that, so
 # only the directory needs tightening. Best effort: a failure here must never block a switch.
 protect_store() { chmod 700 "$CX_STORE" 2>/dev/null || true; }

@@ -79,9 +79,31 @@ chmod 700 "$CX_STORE/bad"
 # --- a lock left by a run that was killed must not block the next one --------------------------
 printf '%s' "$$" > "$CX_LOCK"                   # this shell is alive: a real operation in progress
 ( acquire_lock ) 2>/dev/null && fail "a lock held by a live run must be refused" || true
+: > "$CX_LOCK"                                  # a lock with no owner in it: never a free lock
+( acquire_lock ) 2>/dev/null && fail "a lock with no readable owner must count as live, not stale" || true
 printf '99999999' > "$CX_LOCK"                  # an owner that cannot be alive: killed mid-run
 ( acquire_lock ) || fail "a lock from a killed run must be reclaimed"
+rm -f "$CX_LOCK" "$CX_LOCK".* 2>/dev/null || true
+
+# --- ...and mutual exclusion holds when two real runs race into acquire_lock --------------------
+# The lock has to carry its owner from the instant the name exists. A create-then-write lock has a
+# window where a second run sees the file with nothing in it; reading that as "abandoned" let both
+# runs through into do_switch, and the loser's mv then overwrote a profile's only credential.
+# Separate processes, not subshells: two subshells share one $$ and would not race the way two
+# invocations of the tool do.
+take_lock() {  # <hold seconds> - acquire in a real process, hold, let the EXIT trap release it
+  bash -c 'CODEX_SWITCH_LIB=1 . ./codex-switch.sh; resolve_paths; acquire_lock; sleep "$1"' _ "$1"
+}
 rm -f "$CX_LOCK"
+for i in 1 2 3 4 5; do
+  take_lock 0.3 >/dev/null 2>&1 & first=$!
+  take_lock 0.3 >/dev/null 2>&1 & second=$!
+  if wait $first;  then a=1; else a=0; fi
+  if wait $second; then b=1; else b=0; fi
+  [ $((a + b)) -eq 1 ] ||
+    fail "exactly one of two racing runs may hold the lock (round $i: first=$a second=$b)"
+  rm -f "$CX_LOCK" "$CX_LOCK".* 2>/dev/null || true
+done
 
 # --- a listing row keeps its fields even when the label is empty -------------------------------
 mkdir -p "$CX_STORE/old"                      # a profile that was never logged in: no label, one note

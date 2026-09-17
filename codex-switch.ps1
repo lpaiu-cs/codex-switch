@@ -122,8 +122,15 @@ function Resolve-CodexPaths {
 # Our own process and its ancestors are never returned, so running this from a terminal that Codex
 # itself spawned cannot make the script kill its own shell.
 function Get-CodexProcesses {
-  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-  if (-not $all) { return @() }
+  # A failed query must never come back as "nothing is running": that is the one wrong answer with
+  # teeth here, because Stop-Codex would skip the package shutdown and a switch would then move
+  # auth.json out from under a live app - the exact corruption this tool exists to prevent. So no
+  # -ErrorAction SilentlyContinue, and an empty result is treated as failure too: a query that
+  # actually worked always returns at least this process.
+  $all = @(Get-CimInstance Win32_Process)
+  if (-not $all.Count) {
+    throw "Could not enumerate running processes, so there is no way to tell whether Codex is still running. Leaving auth.json alone; retry, and reboot if it keeps failing."
+  }
   $byId = @{}; $children = @{}
   foreach ($p in $all) {
     $id = [int]$p.ProcessId; $pp = [int]$p.ParentProcessId
