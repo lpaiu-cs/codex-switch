@@ -122,8 +122,15 @@ function Resolve-CodexPaths {
 # Our own process and its ancestors are never returned, so running this from a terminal that Codex
 # itself spawned cannot make the script kill its own shell.
 function Get-CodexProcesses {
-  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-  if (-not $all) { return @() }
+  # A failed query must never come back as "nothing is running": that is the one wrong answer with
+  # teeth here, because Stop-Codex would skip the package shutdown and a switch would then move
+  # auth.json out from under a live app - the exact corruption this tool exists to prevent. So no
+  # -ErrorAction SilentlyContinue, and an empty result is treated as failure too: a query that
+  # actually worked always returns at least this process.
+  $all = @(Get-CimInstance Win32_Process)
+  if (-not $all.Count) {
+    throw "Could not enumerate running processes, so there is no way to tell whether Codex is still running. Leaving auth.json alone; retry, and reboot if it keeps failing."
+  }
   $byId = @{}; $children = @{}
   foreach ($p in $all) {
     $id = [int]$p.ProcessId; $pp = [int]$p.ParentProcessId
@@ -196,13 +203,20 @@ function Invoke-CodexPackageShutdown {
 }
 
 function Stop-Codex {
+  $tracked = @{}
+  foreach ($p in @(Get-CodexProcesses)) { $tracked[[int]$p.ProcessId] = $p.Name }
+  # Nothing of Codex is alive: there is no container to tear down and nothing to kill. Worth
+  # skipping rather than doing anyway - the deployment call below force-shuts the whole AppX
+  # container, which is seconds of work and can take a console down with it, for no gain. The
+  # wedged-app case this repairs still leaves a suspended ChatGPT.exe behind, which is detected
+  # above, so that path is unaffected.
+  if (-not $tracked.Count) { return 0 }
   # 1) the MSIX app and everything inside its container, via the deployment API (see above)
   [void](Invoke-CodexPackageShutdown)
   # 2) whatever lives outside the container - CLI sessions in terminals, the VS Code extension's
   #    app-server, npm installs - plus any straggler. Success is verified against concrete PIDs,
   #    not against whether detection can still see them: once a parent exits a surviving child
   #    could drop out of a fresh scan and fake an "all closed".
-  $tracked = @{}
   for ($i = 0; $i -lt 30; $i++) {
     foreach ($p in @(Get-CodexProcesses)) { $tracked[[int]$p.ProcessId] = $p.Name }
     $alive = @($tracked.Keys | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
@@ -260,18 +274,21 @@ function Set-Active([string]$name) {
   Set-Content -LiteralPath $CX.Marker -Value $name -NoNewline -Encoding Ascii
 }
 
-# Cross-process guard so two overlapping switches can't both move auth.json.
+# Cross-process guard so two overlapping switches can't both move auth.json. The lock is an OPEN
+# FILE HANDLE, not a file that someone has to clean up: Windows drops it the moment the process
+# ends, however it ends. That matters here because this script kills Codex - including, via the
+# AppX container shutdown, potentially the console it is running in - so a "delete it in finally"
+# lock can be orphaned by a run that never gets to run its finally, and then every later run is
+# refused. The file itself is left behind empty; only the handle means anything.
 function Acquire-Lock {
-  $existing = Get-Item -LiteralPath $CX.Lock -Force -ErrorAction SilentlyContinue
-  if ($existing -and ((Get-Date) - $existing.LastWriteTime).TotalMinutes -gt 5) {
-    Remove-Item -LiteralPath $CX.Lock -Force -ErrorAction SilentlyContinue  # stale lock from a crashed run
+  try {
+    return [System.IO.File]::Open($CX.Lock, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+  } catch [System.IO.IOException] {
+    throw "Another codex-switch operation is in progress (lock: $($CX.Lock)). Wait for it to finish, or close the window it is running in, then retry."
   }
-  try { New-Item -ItemType File -Path $CX.Lock -ErrorAction Stop | Out-Null }
-  catch { throw "Another codex-switch operation is in progress (lock: $($CX.Lock)). If it is stale, delete that file and retry." }
-  return $CX.Lock
 }
-function Release-Lock([string]$lock) {
-  if ($lock) { Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue }
+function Release-Lock($lock) {
+  if ($lock) { $lock.Dispose() }
 }
 
 # The profile store holds plaintext bearer tokens. Codex only sets 0600 on Unix, nothing on
