@@ -70,11 +70,19 @@ refresh token 은 1회용이다. 활성 계정이 쓰는 동안 저장소에 복
 
 **2026-09-09 수정.** 데스크톱 앱은 `Stop-Process` 로 하나씩 죽이지 않는다. 실측 결과 Codex 의 MSIX 컨테이너는 개별 강제 종료와 해체가 경쟁하면 깨진다: AppModel-Runtime 로그에 "Destroyed Desktop AppX container" 가 0.1초에 600여 건 찍히고, 패키지는 계속 "실행 중"(재등록 시 0x80073D02) 으로 남으며, 이후 모든 활성화는 모듈 0개·스레드 suspended 인 `ChatGPT.exe` 스텁으로 영원히 멈춘다(로그아웃 전까지). 좀비 핸들, 샌드박스 사용자 프로세스, 잠긴 hive 는 모두 배제됐다. 해법은 Windows 가 쓰는 경로로 닫는 것: `Add-AppxPackage -Register -DisableDevelopmentMode -ForceApplicationShutdown <InstallLocation>\AppxManifest.xml`. 컨테이너 전체(앱 + app-server 자식)를 순서대로 종료·해체하며 약 0.4초, 같은 버전 재등록이라 데이터 영향 없음. 같은 호출이 이미 깨진 상태도 복구한다. 실행 후 8초 안에 모듈이 로드된 프로세스가 보이지 않으면 스텁 제거 → 위 호출 → 1회 재시도한다.
 
-컨테이너 밖의 프로세스(터미널 CLI, VS Code 확장, npm 설치본)에는 claude-switch 의 "프로세스별 자기 증거로 루트 판정 → 부모 맵으로 자손 수집 → PID 로 종료 확인" 구조를 그대로 쓰되 루트 술어만 바꾼다.
+**2026-11-27 수정 (1.1.1).** 주 경로를 재등록에서 PLM 의 `IPackageDebugSettings::TerminateAllProcesses(PackageFullName)` 로 바꿨다. 재등록은 이제 그 호출이 안 통할 때의 대비와 위 스텁 복구에만 쓴다. 2026년 11월 Codex 빌드(26.1117~26.1120)에서 재등록 방식에 문제가 두 가지 생겼다.
+
+- **96초 정지.** 패키지에 Chrome/Edge 확장의 네이티브 호스트(`CodexChromeNativeHost`, `app\resources\plugins\openai-bundled\plugins\chrome\extension-host\windows\x64\extension-host.exe`)가 들어왔다. 브라우저가 `codex-chrome-native-host.exe` 실행 별칭으로 이 호스트를 Codex 컨테이너 안에 띄운다. 종료가 진행되는 중(관측상 시작 약 5초 뒤)에 브라우저가 호스트를 새로 띄우면, 배포는 그 호스트를 기다리다 Windows가 응답 없음으로 판정한 뒤에야(`MoAppHang`, `praid:CodexChromeNativeHost`, 분류 `AppHangXProcB1`) TerminateApplications 로 넘어간다. 성능 요약에 `Gap: 96000 ms` 로 찍힌다. 관측 3회: 11/21 Store 업데이트, 11/27 05:20 사용자 전환, 11/27 05:35 재현 시험. 이미 떠 있는 호스트나 일시정지된 호스트는 막지 못한다. 둘 다 0.3~0.4초 안에 종료됐다. 그러니 원인은 호스트의 존재가 아니라 종료 도중 활성화되는 호스트다.
+- **자동 재실행.** 재등록이 끝나면 약 40 ms 뒤 Windows가 앱을 정상 실행으로 다시 띄운다(프로세스 9~12개). 연속으로 두 번 재등록해도 두 번 다 다시 띄운다. 이때 라이브 `auth.json` 은 아직 나가는 프로필의 것이다. 1.1.0 은 이 인스턴스를 검증 루프에서 프로세스 단위로 죽였는데, 이 문서가 피하려던 바로 그 종료 방식이다.
+
+`TerminateAllProcesses` 실측(26.1120, 3회 연속): 약 100 ms, 앱·렌더러·app-server·네이티브 호스트·`codex-computer-use-swift.exe` 등 패키지 프로세스 전부 종료, 생존 0, 재실행 0. 컨테이너 해체 이벤트는 1회당 정확히 1건(600건 폭주 없음), 다음 실행은 0.5초 안에 정상이었다. LocalSystem 패키지 서비스 `CodexSandboxService.OpenAI.Codex` 는 건드리지 않는다(사용자 범위 호출). 주의: 이 호출은 **설치되지 않은 패키지 이름에도 S_OK 를 돌려준다.** 그래서 반환값이 아니라 결과로 판정한다. 같은 패키지 PID 가 호출을 두 번 받고도 살아 있으면 재등록으로, 그다음엔 1.1.0 과 같은 프로세스 단위 종료로 내려간다. C# 인터페이스는 vtable 순서대로 `TerminateAllProcesses` 까지만 선언했고, `Add-Type` 컴파일은 약 0.1초다.
+
+컨테이너 밖의 프로세스(터미널 CLI, VS Code 확장, npm 설치본)에는 claude-switch 의 "프로세스별 자기 증거로 루트 판정 → 부모 맵으로 자손 수집 → PID 로 종료 확인" 구조를 그대로 쓰되 루트 술어만 바꾼다. 검증 루프에서 패키지 프로세스가 보이면(브라우저가 호스트를 다시 붙이는 경우 등) 하나씩 죽이지 않고 패키지 호출을 다시 쓴다.
 
 루트 판정 (ExecutablePath 기준):
 - `*\WindowsApps\OpenAI.Codex_*` (앱 본체 `ChatGPT.exe`, 렌더러, crashpad, 번들 `codex.exe`)
 - `%LOCALAPPDATA%\OpenAI\Codex\*` (`codex.exe`, `node.exe`, `node_repl.exe`, `codex-code-mode-host.exe`, `codex-command-runner.exe`)
+- `%LOCALAPPDATA%\Programs\OpenAI\Codex\*` 와 `%USERPROFILE%\.codex\packages\*` (단독 설치 CLI. 앞의 `bin` 이 `packages\standalone\current\bin` 을 가리키는 심볼릭 링크다)
 - `%USERPROFILE%\.cache\codex-runtimes\*` (런타임 `pwsh.exe` 등)
 - `%USERPROFILE%\.codex\bin\*`, `%USERPROFILE%\.codex\.sandbox-bin\*` (앱이 홈 안에 materialize 하는 `codex.exe`, `codex-command-runner.exe`)
 - `*\.vscode\extensions\openai.chatgpt-*\bin\*` (VS Code 확장이 번들한 `codex.exe … app-server`)
@@ -84,6 +92,7 @@ refresh token 은 1회용이다. 활성 계정이 쓰는 동안 저장소에 복
 제외:
 - `*\WindowsApps\OpenAI.ChatGPT-Desktop_*` (일반 ChatGPT 앱. 같은 exe 이름 계열이므로 이름 매칭을 쓰면 오살한다)
 - 자기 자신 `$PID` 와 그 조상. Codex 가 띄운 셸에서 실행됐을 때 자살 방지
+- 패키지 서비스 `codex-windows-sandbox-service.exe` (`CodexSandboxService.OpenAI.Codex`, LocalSystem, 26.1117 부터). 사용자가 멈출 수 없고 계정이 아니라 명령 샌드박스를 맡는다. 실행 경로도 읽히지 않으므로 경로 술어에 걸리지 않는다. 이름 술어에도 넣지 않는다(넣으면 종료 실패 → "still running" 으로 전환이 막힌다)
 
 메뉴와 README 에 "터미널·VS Code 에서 돌던 codex 세션도 함께 닫힌다" 를 명시한다.
 
@@ -167,7 +176,7 @@ CLI: `codex-switch.ps1 <name> [-NoLaunch]`, `-Menu`, `-List`, `-Stop`, `-Status`
 | --- | --- | --- |
 | 앱 식별 | 패키지 `OpenAI.Codex` | 번들 ID `com.openai.codex` (디스크 이름은 `ChatGPT.app`) |
 | 건드리면 안 되는 형제 앱 | `OpenAI.ChatGPT-Desktop` | `com.openai.chat` (`ChatGPT Classic.app`) |
-| 정지 | AppX 배포 API로 컨테이너 종료 | 컨테이너 없음 → SIGTERM 후 SIGKILL |
+| 정지 | PLM 패키지 종료(`TerminateAllProcesses`), 대비로 AppX 재등록 | 컨테이너 없음 → SIGTERM 후 SIGKILL |
 | 실행 | `shell:AppsFolder\<aumid>` | `open -b com.openai.codex` |
 | 저장소 권한 | `icacls` | `chmod 700` (Codex가 auth.json 을 이미 0600으로 씀) |
 | JSON·JWT | `ConvertFrom-Json` | `plutil` + `base64 -D` |

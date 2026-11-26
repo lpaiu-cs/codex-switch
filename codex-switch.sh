@@ -33,7 +33,7 @@ set -euo pipefail
 
 # Tool version. Kept in sync with $ScriptVersion in codex-switch.ps1, which is what the release
 # build reads; tools/build-release.ps1 fails if the two ever drift apart.
-SCRIPT_VERSION='1.1.0'
+SCRIPT_VERSION='1.1.1'
 
 # Codex refreshes the ChatGPT tokens when last_refresh is older than this many days. A profile
 # parked for longer may still work (the refresh token itself lives longer) but is flagged in

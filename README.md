@@ -205,15 +205,22 @@ rewrites it a few seconds after launch, and that write is a plain truncate-and-r
 underneath a running Codex would either do nothing or corrupt the file. So `stop.cmd`'s logic runs
 before every switch and aborts if anything survives.
 
-**How it stops the app matters.** The desktop app is shut down through Windows' own package
-machinery (`Add-AppxPackage -Register -ForceApplicationShutdown` on the installed package), which
-terminates the app's whole MSIX container and tears it down in order, in about half a second.
-Killing the processes one by one with `Stop-Process` — what claude-switch does — races that
+**How it stops the app matters.** The desktop app is ended as one package, the way Windows itself
+ends a packaged app: the package lifetime API (`IPackageDebugSettings::TerminateAllProcesses`, the
+same kind of stop as **Settings → Apps → Codex → Advanced options → Terminate**). Every process of
+the package goes at once — the app, its renderers, the `codex.exe` app-server, the Chrome / Edge
+extension's native host — and Windows tears the container down itself, in about a tenth of a
+second. Killing the processes one by one with `Stop-Process` — what claude-switch does — races that
 teardown on Codex: Windows keeps the package marked as running, and every later launch produces a
-`ChatGPT.exe` that sits suspended with no window until you sign out. codex-switch 1.0.1 avoids that,
-and if it ever sees a launch stall that way it repairs the container and retries once by itself.
-Only processes living outside the container — `codex` in terminals, the VS Code extension, npm
-installs — are stopped per process.
+`ChatGPT.exe` that sits suspended with no window until you sign out. If a launch ever stalls that
+way, codex-switch repairs the container and retries once by itself. Only processes living outside
+the container — `codex` in terminals, the VS Code extension, npm installs — are stopped per process.
+
+1.0.1 – 1.1.0 stopped the app by re-registering the package
+(`Add-AppxPackage -Register -ForceApplicationShutdown`). On the November 2026 Codex builds that call
+relaunches Codex the moment it returns — still on the outgoing account's `auth.json` — and can
+stall for about 96 seconds when a browser starts the extension's native host mid-shutdown.
+1.1.1 keeps it only as a fallback, and for the stalled-launch repair.
 
 **macOS has no such container.** The app bundle, its renderers and its `codex` app-server are
 ordinary processes, so every one of them (plus terminal CLI sessions and the VS Code extension's
@@ -227,11 +234,17 @@ Every process is judged on its own image path, then its descendants are swept.
 
 Windows:
 
-- the Store app: `WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe` and its renderers / helpers
+- the Store app: `WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe` and its renderers / helpers, including
+  `extension-host.exe` — the native host the Codex extension for Chrome / Edge starts inside the
+  package (the browser reconnects it by itself afterwards)
 - `codex.exe`, `codex-code-mode-host.exe`, `node.exe`, `node_repl.exe` under `%LOCALAPPDATA%\OpenAI\Codex`
+- the standalone CLI under `%LOCALAPPDATA%\Programs\OpenAI\Codex` (which links into `~\.codex\packages`)
 - runtimes under `~\.cache\codex-runtimes` and `~\.codex\bin` / `.sandbox-bin`
 - the VS Code extension's bundled `codex.exe`, npm-installed CLIs (`node.exe` running `codex.js`)
 - any other `codex.exe` you started in a terminal
+
+Left running on purpose: the package's Windows service, `CodexSandboxService` (LocalSystem). A user
+cannot stop it, and it serves Codex's command sandbox, not an account.
 
 macOS:
 
@@ -265,6 +278,7 @@ refreshes it on the next start.
 | --- | --- |
 | Switch fails with *still running* | Something held on. Run `stop.cmd`, then retry. |
 | Codex never opens after a switch (no window, one `ChatGPT.exe` in Task Manager) | Windows still counts the old instance as running. codex-switch repairs this by itself on launch; if it still fails, run `stop.cmd` once more and relaunch. Upgrading from 1.0.0 fixes the cause. |
+| A switch sits for about a minute and a half before Codex closes; Codex opened during that wait shows the old account | 1.1.0 on Codex builds from November 2026 (see *How it stops the app matters*). Update to 1.1.1, which closes Codex in about a second. Don't open Codex until the switch prints `Launching Codex...`. |
 | `cli_auth_credentials_store = "keyring"` error | Codex is set to keep credentials in the OS keyring / macOS Keychain instead of `auth.json`. Remove that line from `~\.codex\config.toml` (`~/.codex/config.toml` on macOS) or set it to `"file"`, log in again, retry. |
 | Codex opens signed out on a profile that used to work | The refresh token was spent elsewhere (e.g. `codex login`/`logout` ran under that profile, or an old copy of `auth.json` was restored by hand). Log in again once; the profile is repaired. |
 | New profile logs in as the *old* account | Your browser's ChatGPT session was reused. Sign out on chatgpt.com or use a private window, then retry `N`. |
@@ -538,13 +552,20 @@ ChatGPT **refresh token 은 쓸 때마다 바뀝니다.** 앱 실행 시, 8일�
 바꿔치기하면 효과가 없거나 파일이 깨집니다. 그래서 모든 전환 전에 `stop.cmd` 와 같은 로직이
 돌고, 하나라도 남아 있으면 중단합니다.
 
-**어떻게 닫느냐가 중요합니다.** 데스크톱 앱은 Windows의 패키지 관리 기능(설치된 패키지에
-`Add-AppxPackage -Register -ForceApplicationShutdown`)으로 닫습니다. 앱의 MSIX 컨테이너 전체를 순서에
-맞게 종료·해체하며 0.5초 정도 걸립니다. claude-switch처럼 `Stop-Process` 로 프로세스를 하나씩 죽이면
-Codex에서는 컨테이너 해체와 경쟁이 생겨, Windows가 패키지를 계속 "실행 중"으로 간주하고 이후 실행마다
-창 없는 `ChatGPT.exe` 가 멈춘 채 남습니다(로그아웃해야 풀림). codex-switch 1.0.1은 이 방식을 쓰지 않고,
-혹시 그런 식으로 실행이 멈추면 컨테이너를 복구해 한 번 더 시도합니다. 컨테이너 밖에 사는 프로세스
-(터미널의 `codex`, VS Code 확장, npm 설치본)만 프로세스 단위로 닫습니다.
+**어떻게 닫느냐가 중요합니다.** 데스크톱 앱은 Windows가 패키지 앱을 끝낼 때 쓰는 방식 그대로,
+패키지 하나를 통째로 종료합니다(`IPackageDebugSettings::TerminateAllProcesses`, **설정 → 앱 → Codex →
+고급 옵션 → 종료** 와 같은 종류의 종료). 앱·렌더러·`codex.exe` app-server·Chrome/Edge 확장의 네이티브
+호스트까지 패키지의 모든 프로세스가 한 번에 끝나고, 컨테이너 해체는 Windows가 직접 합니다. 0.1초
+정도 걸립니다. claude-switch처럼 `Stop-Process` 로 프로세스를 하나씩 죽이면 Codex에서는 컨테이너
+해체와 경쟁이 생겨, Windows가 패키지를 계속 "실행 중"으로 간주하고 이후 실행마다 창 없는
+`ChatGPT.exe` 가 멈춘 채 남습니다(로그아웃해야 풀림). 혹시 그런 식으로 실행이 멈추면 codex-switch가
+컨테이너를 복구해 한 번 더 시도합니다. 컨테이너 밖에 사는 프로세스(터미널의 `codex`, VS Code 확장,
+npm 설치본)만 프로세스 단위로 닫습니다.
+
+1.0.1~1.1.0은 패키지를 다시 등록하는 방식(`Add-AppxPackage -Register -ForceApplicationShutdown`)으로
+닫았습니다. 2026년 11월 이후 Codex에서는 이 방식이 끝나자마자 Codex를 다시 띄우고(나가는 계정의
+`auth.json` 이 아직 그 자리에 있을 때), 종료 도중 브라우저가 확장의 네이티브 호스트를 띄우면 96초
+가까이 멈춥니다. 1.1.1부터는 대비용과 실행 멈춤 복구용으로만 남겨 두었습니다.
 
 **macOS에는 그런 컨테이너가 없습니다.** 앱 번들과 렌더러, `codex` app-server 모두 평범한
 프로세스이므로 (터미널 CLI 세션과 VS Code 확장 서버까지 함께) 먼저 SIGTERM 을 보내 앱이 상태를
@@ -558,11 +579,17 @@ Codex에서는 컨테이너 해체와 경쟁이 생겨, Windows가 패키지를 
 
 Windows:
 
-- Store 앱: `WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe` 와 렌더러·헬퍼
+- Store 앱: `WindowsApps\OpenAI.Codex_*\app\ChatGPT.exe` 와 렌더러·헬퍼. Chrome/Edge용 Codex 확장이
+  패키지 안에 띄우는 네이티브 호스트 `extension-host.exe` 도 포함됩니다(브라우저가 나중에 알아서 다시
+  연결합니다)
 - `%LOCALAPPDATA%\OpenAI\Codex` 아래의 `codex.exe`, `codex-code-mode-host.exe`, `node.exe`, `node_repl.exe`
+- `%LOCALAPPDATA%\Programs\OpenAI\Codex` 의 단독 설치 CLI(`~\.codex\packages` 로 연결됨)
 - `~\.cache\codex-runtimes`, `~\.codex\bin`, `.sandbox-bin` 아래의 런타임
 - VS Code 확장이 번들한 `codex.exe`, npm 설치 CLI(`codex.js` 를 돌리는 `node.exe`)
 - 터미널에서 직접 실행한 그 밖의 `codex.exe`
+
+일부러 놔두는 것: 패키지에 딸린 Windows 서비스 `CodexSandboxService`(LocalSystem). 사용자 권한으로는
+멈출 수 없고, 계정이 아니라 Codex의 명령 실행 샌드박스를 위한 서비스입니다.
 
 macOS:
 
@@ -595,6 +622,7 @@ macOS의 `com.openai.chat`. 둘 다 실행 파일 이름이 ChatGPT 라서, 이�
 | --- | --- |
 | *still running* 오류로 전환 실패 | 무언가 남아 있습니다. `stop.cmd` 를 실행한 뒤 다시 시도하세요. |
 | 전환 후 Codex가 안 열림 (창 없음, 작업 관리자에 `ChatGPT.exe` 하나) | Windows가 이전 인스턴스를 아직 실행 중으로 봅니다. codex-switch가 실행 시 스스로 복구합니다. 그래도 안 되면 `stop.cmd` 를 한 번 더 실행하고 다시 여세요. 1.0.0에서 올라오면 원인 자체가 사라집니다. |
+| 전환할 때 Codex가 닫히기까지 1분 반쯤 멈춰 있고, 그사이 Codex를 열면 이전 계정으로 열림 | 2026년 11월 이후 Codex에서 1.1.0을 쓸 때 생깁니다(*어떻게 닫느냐가 중요합니다* 참고). 1.1.1로 업데이트하면 1초 안팎에 닫힙니다. 전환이 `Launching Codex...` 를 출력하기 전에는 Codex를 열지 마세요. |
 | `cli_auth_credentials_store = "keyring"` 오류 | Codex가 자격증명을 `auth.json` 대신 OS 키링(macOS는 키체인)에 두도록 설정돼 있습니다. `~\.codex\config.toml`(macOS는 `~/.codex/config.toml`)에서 그 줄을 지우거나 `"file"` 로 바꾸고, 다시 로그인한 뒤 재시도하세요. |
 | 잘 되던 프로필인데 Codex가 로그아웃 상태로 열림 | refresh token 이 다른 곳에서 소모됐습니다(그 프로필에서 `codex login`/`logout` 을 실행했거나, 예전 `auth.json` 복사본을 수동으로 되돌린 경우). 한 번 다시 로그인하면 프로필이 복구됩니다. |
 | 새 프로필인데 *예전* 계정으로 로그인됨 | 브라우저의 ChatGPT 세션이 재사용됐습니다. chatgpt.com 에서 로그아웃하거나 시크릿 창을 쓰고 `N` 을 다시 하세요. |
