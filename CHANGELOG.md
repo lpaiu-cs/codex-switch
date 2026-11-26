@@ -26,9 +26,16 @@ Release tags are `v<version>` (e.g. `v1.0.0`); `codex-switch.ps1 -Version` and
   Advanced options → Terminate). It ends every process of the package in ~0.1 s, including the app,
   its app-server, the browser native hosts and helpers. It waits on nothing, nothing is relaunched,
   and the next launch starts normally. Stopping a running Codex now takes about a second in all.
-  That call answers success even for a package it did nothing to, so it is judged by what survives:
-  a package process still standing after it falls back to the re-registration, and then to
-  per-process termination. The re-registration also remains the repair for a stalled launch.
+  That call answers success even for a package it did nothing to, so it is judged by what survives.
+  If a package process is still standing after it, or a retry of the call fails, codex-switch falls
+  back to the re-registration, and only then to per-process termination. The re-registration also
+  remains the repair for a stalled launch.
+
+### Added
+
+- **`tools/test-stop.ps1`**: a self-check for that fallback order. It drives `Stop-Codex` through
+  every way the package route can end (it works, it fails at once, it reports success while a
+  process survives, the retry fails) against a throwaway process, with no Codex process touched.
 
 ### Changed
 

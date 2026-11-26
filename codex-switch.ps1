@@ -306,11 +306,12 @@ function Stop-Codex {
       if (@($pkgAlive | Where-Object { $calledFor.Contains($_) }).Count) {
         Write-Host "[stop] Codex survived the package terminate call; falling back to re-registration." -ForegroundColor DarkYellow
         $viaPackage = $false
-        [void](Invoke-CodexPackageShutdown)
       } else {
         foreach ($procId in $pkgAlive) { [void]$calledFor.Add($procId) }
         $viaPackage = Stop-CodexPackageProcesses
       }
+      # Either way the package route is over: the re-registration comes before any one-by-one kill.
+      if (-not $viaPackage) { [void](Invoke-CodexPackageShutdown) }
     }
     foreach ($procId in $alive) {
       if ($viaPackage -and $inPackage.ContainsKey($procId)) { continue }
