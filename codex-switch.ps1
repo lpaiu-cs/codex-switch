@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Tool version. Kept in sync with the git tag / GitHub release, which is tagged "v$ScriptVersion".
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.1.1'
 
 if ($Version) {
   Write-Host "codex-switch $ScriptVersion"
@@ -83,7 +83,7 @@ function Resolve-CodexPaths {
 
   # The desktop app is optional: CLI-only installs (npm / standalone) are switched exactly the same
   # way, we just have nothing to launch afterwards.
-  $aumid = $null; $manifest = $null
+  $aumid = $null; $manifest = $null; $fullName = $null
   $pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($pkg) {
     try {
@@ -91,6 +91,7 @@ function Resolve-CodexPaths {
       $aumid = "$($pkg.PackageFamilyName)!$appId"
     } catch { $aumid = "$($pkg.PackageFamilyName)!App" }
     $manifest = Join-Path $pkg.InstallLocation 'AppxManifest.xml'
+    $fullName = $pkg.PackageFullName
   }
 
   [pscustomobject]@{
@@ -102,6 +103,7 @@ function Resolve-CodexPaths {
     Lock    = Join-Path $store 'codex-switch.lock'
     Aumid   = $aumid
     Manifest = $manifest
+    PackageFullName = $fullName
   }
 }
 
@@ -110,20 +112,26 @@ function Resolve-CodexPaths {
 # ---------------------------------------------------------------------------------------------
 
 # Every process that is Codex: the MSIX desktop app (its exe is ChatGPT.exe under
-# WindowsApps\OpenAI.Codex_*), the codex.exe binaries it materialises under %LOCALAPPDATA%\OpenAI\Codex
-# and CODEX_HOME\bin, the node / node_repl / pwsh runtimes, the VS Code extension's bundled
-# codex.exe, npm-installed CLIs (node.exe running codex.js + the vendored codex.exe), and any
-# codex.exe a user started in a terminal. Roots are matched on each process's OWN image path,
-# never derived from one "main" PID, so a leftover helper or an orphaned CLI is still found.
-# Descendants of every root are swept via the parent map.
+# WindowsApps\OpenAI.Codex_*) and everything else that package runs - including the browser
+# extension's native host, extension-host.exe, which Chrome / Edge start inside the Codex package -
+# the codex.exe binaries it materialises under %LOCALAPPDATA%\OpenAI\Codex and CODEX_HOME\bin, the
+# standalone CLI (CODEX_HOME\packages, reached through %LOCALAPPDATA%\Programs\OpenAI\Codex), the
+# node / node_repl / pwsh runtimes, the VS Code extension's bundled codex.exe, npm-installed CLIs
+# (node.exe running codex.js + the vendored codex.exe), and any codex.exe a user started in a
+# terminal. Roots are matched on each process's OWN image path, never derived from one "main" PID,
+# so a leftover helper or an orphaned CLI is still found. Descendants of every root are swept via
+# the parent map.
 #
 # Deliberately NOT matched: the regular ChatGPT app (package OpenAI.ChatGPT-Desktop) - its exe is
 # also called ChatGPT.exe, which is why matching by image name instead of path would kill it.
+# Nor the package's Windows service (codex-windows-sandbox-service.exe): it runs as LocalSystem,
+# outlives the app, cannot be stopped by the user, and serves the command sandbox rather than an
+# account. Its image path is not even readable from here, so no path pattern can match it.
 # Our own process and its ancestors are never returned, so running this from a terminal that Codex
 # itself spawned cannot make the script kill its own shell.
 function Get-CodexProcesses {
   # A failed query must never come back as "nothing is running": that is the one wrong answer with
-  # teeth here, because Stop-Codex would skip the package shutdown and a switch would then move
+  # teeth here, because Stop-Codex would skip the package termination and a switch would then move
   # auth.json out from under a live app - the exact corruption this tool exists to prevent. So no
   # -ErrorAction SilentlyContinue, and an empty result is treated as failure too: a query that
   # actually worked always returns at least this process.
@@ -148,9 +156,11 @@ function Get-CodexProcesses {
   $pathPats = @(
     '*\WindowsApps\OpenAI.Codex_*',
     (Join-Path $local 'OpenAI\Codex\*'),
+    (Join-Path $local 'Programs\OpenAI\Codex\*'),
     (Join-Path $userp '.cache\codex-runtimes\*'),
     (Join-Path $CX.Home 'bin\*'),
     (Join-Path $CX.Home '.sandbox-bin\*'),
+    (Join-Path $CX.Home 'packages\*'),
     '*\.vscode\extensions\openai.chatgpt-*',
     '*\node_modules\@openai\codex*'
   )
@@ -182,15 +192,72 @@ function Get-CodexProcesses {
   return $out.ToArray()   # ToArray, not @($out): @() on a List[object] throws in PS 5.1
 }
 
-# Shut the desktop app down the way Windows itself does it. Re-registering the installed package
-# with -ForceApplicationShutdown makes the AppX runtime terminate the app's whole Desktop AppX
-# container (main process, renderers, the codex.exe app-server and every child) and tear the
-# container down in the right order. Killing those processes one by one with Stop-Process is what
-# claude-switch does, but for Codex it races the container teardown: Windows then logs hundreds of
-# "Destroyed Desktop AppX container" attempts, keeps the package marked as running, and every later
-# launch creates a ChatGPT.exe that sits suspended forever with no window (until a sign-out). The
-# same call repairs that wedged state, which is why it also runs before a launch that produced such
-# a stub. Takes ~0.4 s; re-registering the same version keeps all data and settings.
+# Shut the desktop app down the way Windows itself ends a packaged app: the process lifetime
+# manager's IPackageDebugSettings::TerminateAllProcesses on the installed package - the same kind of
+# stop as the Terminate button under Settings > Apps > Codex > Advanced options. It ends every
+# process in the package's Desktop AppX container at once (main process, renderers, the codex.exe
+# app-server, the browser extension's native host and every child) and leaves tearing the container
+# down to the AppX runtime. Measured on Codex 26.1120: ~0.1 s, nothing relaunched, next launch
+# healthy.
+#
+# Not one by one: killing those processes with Stop-Process is what claude-switch does, but for
+# Codex it races the container teardown. Windows then logs hundreds of "Destroyed Desktop AppX
+# container" attempts, keeps the package marked as running, and every later launch creates a
+# ChatGPT.exe that sits suspended forever with no window (until a sign-out).
+#
+# No longer by re-registration either (1.0.1 - 1.1.0, Invoke-CodexPackageShutdown below). On the
+# November 2026 Codex builds that call (a) relaunches the app the moment it returns, with the
+# OUTGOING profile's auth.json still in place, so the switch then had to kill a freshly started
+# Codex one process at a time; and (b) stalls for ~96 s when Chrome or Edge starts the extension's
+# native host inside the package while the shutdown is under way: the deployment waits on that
+# host until Windows declares it hung (MoAppHang, extension-host.exe). This call waits on nothing
+# and relaunches nothing.
+#
+# Returns $false when the package is not installed or the call fails, so the caller can fall back.
+# $true is NOT proof that anything ended: the call answers S_OK even for a package name that is not
+# installed at all. Stop-Codex therefore judges it by what survives, never by this return value.
+function Stop-CodexPackageProcesses {
+  if (-not $CX.PackageFullName) { return $false }
+  try {
+    if (-not ('CodexSwitch.PackageDebug' -as [type])) {
+      Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace CodexSwitch {
+  // Declared up to the member we call; COM dispatches by vtable slot, so the order is the contract.
+  [ComImport, Guid("F27C3930-8029-4AD1-94E3-3DBA417810C1"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPackageDebugSettings {
+    [PreserveSig] int EnableDebugging([MarshalAs(UnmanagedType.LPWStr)] string packageFullName, [MarshalAs(UnmanagedType.LPWStr)] string debuggerCommandLine, IntPtr environment);
+    [PreserveSig] int DisableDebugging([MarshalAs(UnmanagedType.LPWStr)] string packageFullName);
+    [PreserveSig] int Suspend([MarshalAs(UnmanagedType.LPWStr)] string packageFullName);
+    [PreserveSig] int Resume([MarshalAs(UnmanagedType.LPWStr)] string packageFullName);
+    [PreserveSig] int TerminateAllProcesses([MarshalAs(UnmanagedType.LPWStr)] string packageFullName);
+  }
+  [ComImport, Guid("B1AEC16F-2383-4852-B0E9-8F0B1DC66B4D")] class PackageDebugSettingsClass { }
+  public static class PackageDebug {
+    public static int TerminateAllProcesses(string packageFullName) {
+      var settings = (IPackageDebugSettings)new PackageDebugSettingsClass();
+      try { return settings.TerminateAllProcesses(packageFullName); }
+      finally { Marshal.ReleaseComObject(settings); }
+    }
+  }
+}
+'@
+    }
+    $hr = [CodexSwitch.PackageDebug]::TerminateAllProcesses($CX.PackageFullName)
+    if ($hr -ne 0) { throw ("TerminateAllProcesses returned 0x{0:X8}" -f $hr) }
+    return $true
+  } catch {
+    Write-Host "[stop] package terminate failed, falling back to re-registration: $(($_.Exception.Message -split "`n")[0])" -ForegroundColor DarkYellow
+    return $false
+  }
+}
+
+# Re-register the installed package with -ForceApplicationShutdown, which also makes the AppX runtime
+# terminate the whole container and tear it down in order. This was the stop path of 1.0.1 - 1.1.0;
+# it now serves only as the fallback when Stop-CodexPackageProcesses fails, and as the repair for a
+# wedged container (a launch that produced only a suspended stub) - the state it was verified to
+# clear. Re-registering the same version keeps all data and settings.
 function Invoke-CodexPackageShutdown {
   if (-not $CX.Manifest -or -not (Test-Path -LiteralPath $CX.Manifest)) { return $false }
   try {
@@ -202,26 +269,54 @@ function Invoke-CodexPackageShutdown {
   }
 }
 
+function Test-InCodexPackage($proc) { [string]$proc.ExecutablePath -like '*\WindowsApps\OpenAI.Codex_*' }
+
 function Stop-Codex {
   $tracked = @{}
   foreach ($p in @(Get-CodexProcesses)) { $tracked[[int]$p.ProcessId] = $p.Name }
   # Nothing of Codex is alive: there is no container to tear down and nothing to kill. Worth
-  # skipping rather than doing anyway - the deployment call below force-shuts the whole AppX
-  # container, which is seconds of work and can take a console down with it, for no gain. The
-  # wedged-app case this repairs still leaves a suspended ChatGPT.exe behind, which is detected
-  # above, so that path is unaffected.
+  # skipping rather than doing anyway - the package call below ends the whole AppX container, which
+  # can take a console down with it, for no gain. The wedged-app case still leaves a suspended
+  # ChatGPT.exe behind, which is detected above, so that path is unaffected.
   if (-not $tracked.Count) { return 0 }
-  # 1) the MSIX app and everything inside its container, via the deployment API (see above)
-  [void](Invoke-CodexPackageShutdown)
+  Write-Host "[stop] closing Codex..." -ForegroundColor DarkGray
+  # 1) the MSIX app and everything inside its container, in one call (see above). Only if that is
+  #    unavailable, the 1.1.0 re-registration - whose relaunch the loop below then kills per process,
+  #    exactly as 1.1.0 did.
+  $viaPackage = Stop-CodexPackageProcesses
+  if (-not $viaPackage) { [void](Invoke-CodexPackageShutdown) }
   # 2) whatever lives outside the container - CLI sessions in terminals, the VS Code extension's
   #    app-server, npm installs - plus any straggler. Success is verified against concrete PIDs,
   #    not against whether detection can still see them: once a parent exits a surviving child
-  #    could drop out of a fresh scan and fake an "all closed".
+  #    could drop out of a fresh scan and fake an "all closed". A process of the package itself
+  #    (a browser reconnecting its native host can start one at any moment) goes through the
+  #    package call again. One that is still there after a second call means that call does not
+  #    work here: fall back to the re-registration, and from then on kill one by one as 1.1.0 did.
+  $calledFor = New-Object 'System.Collections.Generic.HashSet[int]'
   for ($i = 0; $i -lt 30; $i++) {
-    foreach ($p in @(Get-CodexProcesses)) { $tracked[[int]$p.ProcessId] = $p.Name }
+    $inPackage = @{}
+    foreach ($p in @(Get-CodexProcesses)) {
+      $tracked[[int]$p.ProcessId] = $p.Name
+      if (Test-InCodexPackage $p) { $inPackage[[int]$p.ProcessId] = $true }
+    }
     $alive = @($tracked.Keys | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
     if (-not $alive.Count) { return $tracked.Count }
-    foreach ($procId in $alive) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
+    $pkgAlive = @($alive | Where-Object { $inPackage.ContainsKey($_) })
+    if ($viaPackage -and $pkgAlive.Count) {
+      if (@($pkgAlive | Where-Object { $calledFor.Contains($_) }).Count) {
+        Write-Host "[stop] Codex survived the package terminate call; falling back to re-registration." -ForegroundColor DarkYellow
+        $viaPackage = $false
+      } else {
+        foreach ($procId in $pkgAlive) { [void]$calledFor.Add($procId) }
+        $viaPackage = Stop-CodexPackageProcesses
+      }
+      # Either way the package route is over: the re-registration comes before any one-by-one kill.
+      if (-not $viaPackage) { [void](Invoke-CodexPackageShutdown) }
+    }
+    foreach ($procId in $alive) {
+      if ($viaPackage -and $inPackage.ContainsKey($procId)) { continue }
+      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    }
     Start-Sleep -Milliseconds 200
   }
   $alive = @($tracked.Keys | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
@@ -588,8 +683,8 @@ try {
     if ($CX.Aumid) {
       Write-Host "Launching Codex..." -ForegroundColor Green
       if (-not (Start-CodexApp)) {
-        # The app never got past a suspended stub: the package's container is wedged. Repair it the
-        # same way Stop does and try exactly once more.
+        # The app never got past a suspended stub: the package's container is wedged. Repair it with
+        # the package re-registration (the call verified to clear this state) and try exactly once more.
         Write-Host "[launch] Codex did not start (Windows still thinks it is running) - repairing and retrying once..." -ForegroundColor Yellow
         Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { -not $_.Path -or $_.Path -like '*\WindowsApps\OpenAI.Codex_*' } | Stop-Process -Force -ErrorAction SilentlyContinue
         [void](Invoke-CodexPackageShutdown)

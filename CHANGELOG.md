@@ -6,6 +6,46 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Release tags are `v<version>` (e.g. `v1.0.0`); `codex-switch.ps1 -Version` and
 `codex-switch.sh --version` report the version of the copy you have.
 
+## [1.1.1] - 2026-11-27
+
+### Fixed
+
+- **A switch could sit for ~1.5 minutes before Codex closed (Windows).** Since the November 2026
+  Codex builds, the package also carries the Chrome / Edge extension's native host
+  (`extension-host.exe`), which the browsers start inside the Codex package. When one was started
+  while the 1.0.1 package shutdown (`Add-AppxPackage -Register -ForceApplicationShutdown`) was
+  under way, Windows waited ~96 s for it, until it declared the host hung (`MoAppHang`), and only
+  then closed Codex. codex-switch printed nothing in between, so the switch looked frozen. A Codex
+  opened by hand during that wait still ran on the outgoing account's `auth.json`.
+- **Windows relaunched Codex in the middle of every switch.** On the same builds the
+  re-registration starts the app again the moment it returns, still on the outgoing account's
+  `auth.json`. codex-switch then killed that fresh instance process by process, which is the kind
+  of stop 1.0.1 had moved away from.
+- Both are gone. The desktop app is now ended through the package lifetime API
+  (`IPackageDebugSettings::TerminateAllProcesses`, the same kind of stop as Settings → Apps →
+  Advanced options → Terminate). It ends every process of the package in ~0.1 s, including the app,
+  its app-server, the browser native hosts and helpers. It waits on nothing, nothing is relaunched,
+  and the next launch starts normally. Stopping a running Codex now takes about a second in all.
+  That call answers success even for a package it did nothing to, so it is judged by what survives.
+  If a package process is still standing after it, or a retry of the call fails, codex-switch falls
+  back to the re-registration, and only then to per-process termination. The re-registration also
+  remains the repair for a stalled launch.
+
+### Added
+
+- **`tools/test-stop.ps1`**: a self-check for that fallback order. It drives `Stop-Codex` through
+  every way the package route can end (it works, it fails at once, it reports success while a
+  process survives, the retry fails) against a throwaway process, with no Codex process touched.
+
+### Changed
+
+- `[stop] closing Codex...` is printed before Codex is closed, so a slow stop never looks frozen.
+- The standalone `codex` CLI under `%LOCALAPPDATA%\Programs\OpenAI\Codex` (a link into
+  `~\.codex\packages`) is matched by its path, not only by its file name.
+- The package's new Windows service, `CodexSandboxService` (LocalSystem), is deliberately left
+  running: a user cannot stop it, and it serves the command sandbox, not an account.
+- macOS: unchanged apart from the version number.
+
 ## [1.1.0] - 2026-09-12
 
 ### Added
@@ -90,5 +130,7 @@ redesigned around how Codex actually stores an account (see [docs/DESIGN.md](doc
   `thread_history_1.sqlite`, `state_5.sqlite`, `memories/` per profile for users who need thread
   history kept apart between accounts.
 
+[1.1.1]: https://github.com/lpaiu-cs/codex-switch/releases/tag/v1.1.1
+[1.1.0]: https://github.com/lpaiu-cs/codex-switch/releases/tag/v1.1.0
 [1.0.1]: https://github.com/lpaiu-cs/codex-switch/releases/tag/v1.0.1
 [1.0.0]: https://github.com/lpaiu-cs/codex-switch/releases/tag/v1.0.0
